@@ -147,6 +147,43 @@ def gather_elements(g, dcn_params, input, p_y, p_x, mask_y, mask_x):
     out_w = dcn_params["out_w"]
     K = dcn_params["kernel_area_size"]
     index_dtype_onnx = dcn_params["index_dtype_onnx"]
+
+    # index = add(g, mul(g, p_y, tensor(g, w, dtype=index_dtype_pytorch)), p_x)
+    p_y = reshape(g, p_y, [b, group, out_h * out_w * K, 1])
+    p_x = reshape(g, p_x, [b, group, out_h * out_w * K, 1])
+    index = g.op("Concat", p_y, p_x, axis_i=3)
+    mask_y = reshape(g, mask_y, [b, group, out_h * out_w * K, 1])
+    mask_x = reshape(g, mask_x, [b, group, out_h * out_w * K, 1])
+    mask = g.op("And", mask_y, mask_x)
+    mask = g.op("Cast", mask, to_i=index_dtype_onnx)
+
+    # If an index value is out of bounds, clear it to avoid error.
+    index = mul(g, index, mask)
+    # => index.shape is (b, group, out_h * out_w * K, 2)
+
+    input = reshape(g, input, [b, group, ch, h, w])
+    input = g.op("Transpose", input, perm_i=[0, 1, 3, 4, 2])
+    # => input.shape is (b, group, h, w, ch)
+
+    v = g.op("GatherND", input, index, batch_dims_i=2)
+    # => v.shape is (b, group, out_h * out_w * K, ch)
+    v = mul(g, v, mask)
+    v = g.op("Transpose", v, perm_i=[0, 1, 3, 2])
+    return reshape(g, v, [b, group, ch, out_h, out_w, K])
+
+
+def gather_elements_org(g, dcn_params, input, p_y, p_x, mask_y, mask_x):
+    """Gather elements specified p_y and p_x.
+    """
+    b = dcn_params["batch"]
+    group = dcn_params["n_offset_grps"]
+    h = dcn_params["in_h"]
+    w = dcn_params["in_w"]
+    ch = dcn_params["in_ch_per_group"]
+    out_h = dcn_params["out_h"]
+    out_w = dcn_params["out_w"]
+    K = dcn_params["kernel_area_size"]
+    index_dtype_onnx = dcn_params["index_dtype_onnx"]
     index_dtype_pytorch = dcn_params["index_dtype_pytorch"]
 
     index = add(g, mul(g, p_y, tensor(g, w, dtype=index_dtype_pytorch)), p_x)

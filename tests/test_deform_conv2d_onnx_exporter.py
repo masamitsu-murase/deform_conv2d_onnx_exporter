@@ -18,7 +18,7 @@ def tonumpy(tensor):
 
 
 class DeformConv2dOpTestCase(unittest.TestCase):
-    OPSET_VERSION = 11
+    OPSET_VERSION = 12
 
     def create_input_params(self, dcn_params):
         size = [
