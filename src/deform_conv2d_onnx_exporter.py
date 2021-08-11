@@ -176,7 +176,6 @@ def gather_elements(g, dcn_params, input, p_y, p_x, mask_y, mask_x):
 
     v = g.op("GatherND", input, index, batch_dims_i=2)
     # => v.shape is (b, group, out_h * out_w * K, ch)
-    v = mul(g, v, mask)
     return reshape(g, v, [b, group, out_h, out_w, K, ch])
 
 
@@ -300,9 +299,10 @@ def calculate_p_tlbr(g, dcn_params, p_tl):
     }
 
 
-def calculate_ratio(g, dcn_params, p, p_tl):
+def calculate_ratio(g, dcn_params, p, p_tl, mask_tlbr):
     """Calculate ratio value for bilinear interpolation.
     """
+    input_dtype = dcn_params["input_dtype_onnx"]
     offset_dtype = dcn_params["offset_dtype_pytorch"]
 
     one = tensor(g, 1.0, dtype=offset_dtype)
@@ -313,15 +313,20 @@ def calculate_ratio(g, dcn_params, p, p_tl):
     diff_y_inv = sub(g, one, diff_y)
     diff_x_inv = sub(g, one, diff_x)
 
+    mask_tl = g.op("Cast", g.op("And", mask_tlbr["t"], mask_tlbr["l"]), to_i=input_dtype)
+    mask_br = g.op("Cast", g.op("And", mask_tlbr["b"], mask_tlbr["r"]), to_i=input_dtype)
+    mask_bl = g.op("Cast", g.op("And", mask_tlbr["b"], mask_tlbr["l"]), to_i=input_dtype)
+    mask_tr = g.op("Cast", g.op("And", mask_tlbr["t"], mask_tlbr["r"]), to_i=input_dtype)
+
     # bilinear kernel (b, group, ch, out_h, out_w, kernel_area_size)
     # (1 - (p_x - p_l)) * (1 - (p_y - p_t))
-    ratio_tl = mul(g, diff_x_inv, diff_y_inv)
+    ratio_tl = mul(g, mul(g, diff_x_inv, diff_y_inv), mask_tl)
     # (p_x - p_l) * (p_y - p_t)
-    ratio_br = mul(g, diff_x, diff_y)
+    ratio_br = mul(g, mul(g, diff_x, diff_y), mask_br)
     # (1 - (p_x - p_l)) * (p_y - p_t)
-    ratio_bl = mul(g, diff_x_inv, diff_y)
+    ratio_bl = mul(g, mul(g, diff_x_inv, diff_y), mask_bl)
     # (p_x - p_l) * (1 - (p_y - p_t))
-    ratio_tr = mul(g, diff_x, diff_y_inv)
+    ratio_tr = mul(g, mul(g, diff_x, diff_y_inv), mask_tr)
 
     return {
         "tl": ratio_tl,
@@ -349,6 +354,11 @@ def deform_conv2d(g, input, weight, offset, mask, bias, stride_h, stride_w,
 
     out_h = get_tensor_dim_size(offset, 2)
     out_w = get_tensor_dim_size(offset, 3)
+
+    input_dtype = sym_help._try_get_scalar_type(input)
+    input_dtype_onnx = sym_help.cast_pytorch_to_onnx[input_dtype]
+    dtype_index = sym_help.scalar_type_to_onnx.index(input_dtype_onnx)
+    input_dtype_pytorch = sym_help.scalar_type_to_pytorch_type[dtype_index]
 
     offset_dtype = sym_help._try_get_scalar_type(offset)
     offset_dtype_onnx = sym_help.cast_pytorch_to_onnx[offset_dtype]
@@ -385,6 +395,11 @@ def deform_conv2d(g, input, weight, offset, mask, bias, stride_h, stride_w,
         "dilation_w": dilation_w,
         "n_offset_grps": n_offset_grps,
 
+        # input data type
+        "input_dtype": input_dtype,
+        "input_dtype_onnx": input_dtype_onnx,
+        "input_dtype_pytorch": input_dtype_pytorch,
+
         # offset data type
         "offset_dtype": offset_dtype,
         "offset_dtype_onnx": offset_dtype_onnx,
@@ -406,8 +421,8 @@ def deform_conv2d(g, input, weight, offset, mask, bias, stride_h, stride_w,
 
     p_tl = calculate_p_tl(g, dcn_params, p)
     p_tlbr = calculate_p_tlbr(g, dcn_params, p_tl)
-    ratio_tlbr = calculate_ratio(g, dcn_params, p, p_tl)
     mask_tlbr = create_clipping_mask(g, dcn_params, p_tlbr)
+    ratio_tlbr = calculate_ratio(g, dcn_params, p, p_tl, mask_tlbr)
 
     input = reshape(g, input,
                     [batch, n_offset_grps, in_ch_per_group, in_h, in_w])
