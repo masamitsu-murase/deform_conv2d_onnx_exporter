@@ -89,7 +89,13 @@ class DeformConv2dOpTestCase(unittest.TestCase):
         }
         if mask is not None:
             input_params["mask"] = tonumpy(mask)
-        return model.run(["output"], input_params)[0]
+        import time
+        start = time.perf_counter()
+        try:
+            return model.run(["output"], input_params)[0]
+        finally:
+            end = time.perf_counter()
+            print("time: ", end - start)
 
     def run_with_dcn_params(self, dcn_params, message=""):
         print(dcn_params)
@@ -173,7 +179,7 @@ class DeformConv2dOpTestCase(unittest.TestCase):
             dcn_params["stride_w"]) + 1
         return dcn_params
 
-    def test_random_parameters(self):
-        for _ in range(100):
+    def xtest_random_parameters(self):
+        for _ in range(10):
             dcn_params = self.generate_random_parameters()
             self.run_with_dcn_params(dcn_params)

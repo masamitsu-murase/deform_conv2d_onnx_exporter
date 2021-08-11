@@ -74,10 +74,9 @@ def calculate_p_0(dcn_params):
 
     p_0_y, p_0_x = torch.meshgrid(torch.arange(0, h * stride_h, stride_h),
                                   torch.arange(0, w * stride_w, stride_w))
-    p_0_y = torch.flatten(p_0_y).view(1, 1, h, w).repeat(1, K, 1, 1)
-    p_0_x = torch.flatten(p_0_x).view(1, 1, h, w).repeat(1, K, 1, 1)
-    p_0 = torch.cat([p_0_y, p_0_x], 1)
-    return p_0
+    p_0_y = p_0_y.view(1, 1, 1, h, w).repeat(1, 1, K, 1, 1)
+    p_0_x = p_0_x.view(1, 1, 1, h, w).repeat(1, 1, K, 1, 1)
+    return p_0_y, p_0_x
 
 
 def calculate_p_k(dcn_params):
@@ -93,8 +92,24 @@ def calculate_p_k(dcn_params):
         torch.arange(0, kernel_h * dilation_h, step=dilation_h),
         torch.arange(0, kernel_w * dilation_w, step=dilation_w),
     )
-    p_n = torch.cat([torch.flatten(p_n_y), torch.flatten(p_n_x)], 0)
-    return p_n.reshape((1, 2 * K, 1, 1))
+    return p_n_y.reshape(1, 1, K, 1, 1), p_n_x.reshape(1, 1, K, 1, 1)
+
+
+def calculate_p_helper(g, dcn_params, p_0, p_k, offset):
+    b = dcn_params["batch"]
+    K = dcn_params["kernel_area_size"]
+    h = dcn_params["out_h"]
+    w = dcn_params["out_w"]
+    group = dcn_params["n_offset_grps"]
+    offset_dtype = dcn_params["offset_dtype_pytorch"]
+
+    p = p_0 + p_k
+    # => p.shape is (1, 1, K, h, w)
+    p = add(g, tensor(g, p.tolist(), dtype=offset_dtype), offset)
+    p = g.op("Transpose", p, perm_i=[0, 1, 3, 4, 2])
+    # => p.shape is (b, group, h, w, K)
+    p = reshape(g, p, [b, group, 1, h, w, K])
+    return p
 
 
 def calculate_p(g, dcn_params, offset):
@@ -105,25 +120,19 @@ def calculate_p(g, dcn_params, offset):
     h = dcn_params["out_h"]
     w = dcn_params["out_w"]
     group = dcn_params["n_offset_grps"]
-    offset_dtype = dcn_params["offset_dtype_pytorch"]
 
     offset = reshape(g, offset, [b, group, 2 * K, h, w])
 
     # Gather offset x and offset y.
     offset_y = slice(g, offset, [2], [0], [2 * K], steps=[2])
     offset_x = slice(g, offset, [2], [1], [2 * K + 1], steps=[2])
-    offset = g.op("Concat", offset_y, offset_x, axis_i=2)
 
-    p_0 = calculate_p_0(dcn_params)
-    p_k = calculate_p_k(dcn_params)
-    p_0_k = p_0 + p_k
-    # => p_0_k.shape is (1, 2*K, h, w)
-    p_0_k.unsqueeze_(1)
-    p = add(g, tensor(g, p_0_k.tolist(), dtype=offset_dtype), offset)
-    p = g.op("Transpose", p, perm_i=[0, 1, 3, 4, 2])
-    # => p.shape is (b, group, h, w, 2*K)
-    p = reshape(g, p, [b, group, 1, h, w, 2 * K])
-    return p
+    p_0_y, p_0_x = calculate_p_0(dcn_params)
+    p_k_y, p_k_x = calculate_p_k(dcn_params)
+
+    p_y = calculate_p_helper(g, dcn_params, p_0_y, p_k_y, offset_y)
+    p_x = calculate_p_helper(g, dcn_params, p_0_x, p_k_x, offset_x)
+    return p_y, p_x
 
 
 def gather_elements(g, dcn_params, input, p_y, p_x, mask_y, mask_x):
@@ -192,42 +201,30 @@ def reshape_v_for_conv(g, dcn_params, v):
 
     v = reshape(g, v, [b, ch, h, w, K])
     items = g.op("Split",
-                v,
-                split_i=[kernel_w] * kernel_h,
-                axis_i=4,
-                outputs=kernel_h)
+                 v,
+                 split_i=[kernel_w] * kernel_h,
+                 axis_i=4,
+                 outputs=kernel_h)
     shape = tensor(g, [b, ch, h, w * kernel_w], dtype=torch.int64)
     items = [reshape(g, item, shape) for item in items]
     concatnated_v = g.op("Concat", *items, axis_i=3)
     return reshape(g, concatnated_v, [b, ch, h * kernel_h, w * kernel_w])
 
 
-def calculate_p_tlbr_yx(g, dcn_params, p):
+def calculate_p_tlbr(g, dcn_params, p_y, p_x):
     """Calculate floor and ceil of p.
     """
-    kernel_area_size = dcn_params["kernel_area_size"]
     offset_dtype = dcn_params["offset_dtype_pytorch"]
 
-    def y_coords(value):
-        return slice(g, value, [5], [0], [kernel_area_size])
-
-    def x_coords(value):
-        return slice(g, value, [5], [kernel_area_size], [2 * kernel_area_size])
-
-    # p.shape is (b, n_offset_grps, 1, out_h, out_w, 2*kernel_area_size)
-    p_lt = g.op("Floor", p)
+    # p_y/p_x.shape is (b, n_offset_grps, 1, out_h, out_w, kernel_area_size)
+    p_t = g.op("Floor", p_y)
+    p_l = g.op("Floor", p_x)
     one = tensor(g, 1, dtype=offset_dtype)
-    p_rb = add(g, p_lt, one)
 
-    p_t = y_coords(p_lt)
-    p_l = x_coords(p_lt)
-    p_b = y_coords(p_rb)
-    p_r = x_coords(p_rb)
+    p_b = add(g, p_t, one)
+    p_r = add(g, p_l, one)
 
-    p_y = y_coords(p)
-    p_x = x_coords(p)
-
-    return p_t, p_l, p_b, p_r, p_y, p_x
+    return p_t, p_l, p_b, p_r
 
 
 def calculate_ratio(g, dcn_params, p_y, p_x, p_t, p_l):
@@ -327,10 +324,10 @@ def deform_conv2d(g, input, weight, offset, mask, bias, stride_h, stride_w,
         "index_dtype_pytorch": index_dtype_pytorch,
     }
 
-    p = calculate_p(g, dcn_params, offset)
-    # => p.shape is (b, n_offset_grps, 1, out_h, out_w, 2*kernel_area_size)
+    p_y, p_x = calculate_p(g, dcn_params, offset)
+    # => p_y/p_x.shape is (b, n_offset_grps, 1, out_h, out_w, kernel_area_size)
 
-    p_t, p_l, p_b, p_r, p_y, p_x = calculate_p_tlbr_yx(g, dcn_params, p)
+    p_t, p_l, p_b, p_r = calculate_p_tlbr(g, dcn_params, p_y, p_x)
     ratio_lt, ratio_rb, ratio_lb, ratio_rt = calculate_ratio(
         g, dcn_params, p_y, p_x, p_t, p_l)
 
