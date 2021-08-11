@@ -108,7 +108,7 @@ def calculate_p_helper(g, dcn_params, p_0, p_k, offset):
     p = add(g, tensor(g, p.tolist(), dtype=offset_dtype), offset)
     p = g.op("Transpose", p, perm_i=[0, 1, 3, 4, 2])
     # => p.shape is (b, group, h, w, K)
-    p = reshape(g, p, [b, group, 1, h, w, K])
+    p = reshape(g, p, [b, group, h, w, K, 1])
     return p
 
 
@@ -148,7 +148,6 @@ def gather_elements(g, dcn_params, input, p_y, p_x, mask_y, mask_x):
     K = dcn_params["kernel_area_size"]
     index_dtype_onnx = dcn_params["index_dtype_onnx"]
 
-    # index = add(g, mul(g, p_y, tensor(g, w, dtype=index_dtype_pytorch)), p_x)
     p_y = reshape(g, p_y, [b, group, out_h * out_w * K, 1])
     p_x = reshape(g, p_x, [b, group, out_h * out_w * K, 1])
     index = g.op("Concat", p_y, p_x, axis_i=3)
@@ -161,15 +160,10 @@ def gather_elements(g, dcn_params, input, p_y, p_x, mask_y, mask_x):
     index = mul(g, index, mask)
     # => index.shape is (b, group, out_h * out_w * K, 2)
 
-    input = reshape(g, input, [b, group, ch, h, w])
-    input = g.op("Transpose", input, perm_i=[0, 1, 3, 4, 2])
-    # => input.shape is (b, group, h, w, ch)
-
     v = g.op("GatherND", input, index, batch_dims_i=2)
     # => v.shape is (b, group, out_h * out_w * K, ch)
     v = mul(g, v, mask)
-    v = g.op("Transpose", v, perm_i=[0, 1, 3, 2])
-    return reshape(g, v, [b, group, ch, out_h, out_w, K])
+    return reshape(g, v, [b, group, out_h, out_w, K, ch])
 
 
 def gather_elements_org(g, dcn_params, input, p_y, p_x, mask_y, mask_x):
@@ -230,6 +224,8 @@ def reshape_v_for_conv(g, dcn_params, v):
     kernel_h = dcn_params["kernel_h"]
     kernel_w = dcn_params["kernel_w"]
     K = dcn_params["kernel_area_size"]
+
+    v = g.op("Transpose", v, perm_i=[0, 1, 5, 2, 3, 4])
 
     if kernel_h == 1:
         # Split returnes not list of tensor but a tensor
@@ -377,6 +373,11 @@ def deform_conv2d(g, input, weight, offset, mask, bias, stride_h, stride_w,
     p_r = g.op("Cast", p_r, to_i=index_dtype_onnx)
     mask_r = create_clipping_mask(g, dcn_params, p_r, in_w)
 
+    input_with_pad = reshape(
+        g, input_with_pad, [batch, n_offset_grps, in_ch_per_group, in_h, in_w])
+    input_with_pad = g.op("Transpose", input_with_pad, perm_i=[0, 1, 3, 4, 2])
+    # => input.shape is (b, group, h, w, ch)
+
     # (b, group, in_ch_per_group, out_h, out_w, kernel_area_size)
     v_lt = gather_elements(g, dcn_params, input_with_pad, p_t, p_l, mask_t,
                            mask_l)
@@ -397,8 +398,8 @@ def deform_conv2d(g, input, weight, offset, mask, bias, stride_h, stride_w,
 
     if use_mask:
         mask = reshape(
-            g, mask, [batch, n_offset_grps, 1, kernel_area_size, out_h, out_w])
-        mask = g.op("Transpose", mask, perm_i=[0, 1, 2, 4, 5, 3])
+            g, mask, [batch, n_offset_grps, kernel_area_size, out_h, out_w, 1])
+        mask = g.op("Transpose", mask, perm_i=[0, 1, 3, 4, 2, 5])
         v = mul(g, v, mask)
 
     v = reshape_v_for_conv(g, dcn_params, v)
