@@ -114,58 +114,6 @@ def calculate_p(g, dcn_params, offset):
     return p
 
 
-def gather_elements(g, dcn_params, input, p_y, p_x):
-    """Gather elements specified p_y and p_x.
-    """
-    b = dcn_params["batch"]
-    group = dcn_params["n_offset_grps"]
-    ch = dcn_params["in_ch_per_group"]
-    out_h = dcn_params["out_h"]
-    out_w = dcn_params["out_w"]
-    K = dcn_params["kernel_area_size"]
-
-    # If an index value is out of bounds, clear it to avoid error.
-    p_y = reshape(g, p_y, [b, group, out_h * out_w * K, 1])
-    p_x = reshape(g, p_x, [b, group, out_h * out_w * K, 1])
-    index = g.op("Concat", p_y, p_x, axis_i=3)
-    # => index.shape is (b, group, out_h * out_w * K, 2)
-
-    v = g.op("GatherND", input, index, batch_dims_i=2)
-    # => v.shape is (b, group, out_h * out_w * K, ch)
-    v = g.op("Transpose", v, perm_i=[0, 1, 3, 2])
-    return reshape(g, v, [b, group, ch, K, out_h, out_w])
-
-
-def gather_elements_tlbr(g, dcn_params, input, p_tlbr):
-    patterns = ["tl", "br", "bl", "tr"]
-    v_tlbr = {}
-    for key in patterns:
-        key_y = key[0]  # "t" or "b"
-        key_x = key[1]  # "l" or "r"
-        p_y = p_tlbr[key_y]
-        p_x = p_tlbr[key_x]
-        v = gather_elements(g, dcn_params, input, p_y, p_x)
-        v_tlbr[key] = v
-    return v_tlbr
-
-
-def reshape_v_for_conv(g, dcn_params, v):
-    """Reshape v for convolution.
-    """
-    b = dcn_params["batch"]
-    h = dcn_params["out_h"]
-    w = dcn_params["out_w"]
-    ch = dcn_params["in_ch"]
-    kernel_h = dcn_params["kernel_h"]
-    kernel_w = dcn_params["kernel_w"]
-    K = dcn_params["kernel_area_size"]
-
-    #    (batch, n_offset_grps, in_ch_per_group, K, out_h, out_w)
-    v = reshape(g, v, [b, ch, kernel_h, kernel_w, h, w])
-    v = g.op("Transpose", v, perm_i=[0, 1, 4, 2, 5, 3])
-    return reshape(g, v, [b, ch, h * kernel_h, w * kernel_w])
-
-
 def calculate_p_tl(g, dcn_params, p):
     """Calculate floor of p.
     """
@@ -247,11 +195,133 @@ def calculate_weight(g, dcn_params, p, p_tl):
     }
 
 
-@sym_help.parse_args("v", "v", "v", "v", "v", "i", "i", "i", "i", "i", "i",
-                     "i", "i", "b")
-def deform_conv2d(g, input, weight, offset, mask, bias, stride_h, stride_w,
-                  pad_h, pad_w, dilation_h, dilation_w, n_weight_grps,
-                  n_offset_grps, use_mask):
+def reshape_input_for_gather_elements(g, dcn_params, input):
+    """Reshape input for gather_elements function.
+    """
+    b = dcn_params["batch"]
+    group = dcn_params["n_offset_grps"]
+    ch = dcn_params["in_ch_per_group"]
+    in_h = dcn_params["in_h"]
+    in_w = dcn_params["in_w"]
+    pad_h = dcn_params["padding_h"]
+    pad_w = dcn_params["padding_w"]
+    additional_pad_h = dcn_params["additional_pad_h"]
+    additional_pad_w = dcn_params["additional_pad_w"]
+
+    pad_size = [
+        0,
+        0,
+        (pad_h + additional_pad_h),
+        (pad_w + additional_pad_w),
+        0,
+        0,
+        (pad_h + additional_pad_h),
+        (pad_w + additional_pad_w),
+    ]
+    pad = tensor(g, pad_size, dtype=torch.int64)
+    input = g.op("Pad", input, pad, mode_s="constant")
+    input = reshape(g, input, [b, group, ch, in_h, in_w])
+    input = g.op("Transpose", input, perm_i=[0, 1, 3, 4, 2])
+    # => input.shape is (b, group, in_h, in_w, ch)
+    return input
+
+
+def gather_elements(g, dcn_params, input, p_y, p_x):
+    """Gather elements specified p_y and p_x.
+    """
+    b = dcn_params["batch"]
+    group = dcn_params["n_offset_grps"]
+    ch = dcn_params["in_ch_per_group"]
+    out_h = dcn_params["out_h"]
+    out_w = dcn_params["out_w"]
+    K = dcn_params["kernel_area_size"]
+
+    p_y = reshape(g, p_y, [b, group, out_h * out_w * K, 1])
+    p_x = reshape(g, p_x, [b, group, out_h * out_w * K, 1])
+    index = g.op("Concat", p_y, p_x, axis_i=3)
+    # => index.shape is (b, group, out_h * out_w * K, 2)
+
+    v = g.op("GatherND", input, index, batch_dims_i=2)
+    # => v.shape is (b, group, out_h * out_w * K, ch)
+    v = g.op("Transpose", v, perm_i=[0, 1, 3, 2])
+    v = reshape(g, v, [b, group, ch, K, out_h, out_w])
+    return v
+
+
+def gather_elements_tlbr(g, dcn_params, input, p_tlbr):
+    """Gather elements specified by p_tlbr.
+    """
+    patterns = ["tl", "br", "bl", "tr"]
+    v_tlbr = {}
+    for key in patterns:
+        key_y = key[0]  # "t" or "b"
+        key_x = key[1]  # "l" or "r"
+        p_y = p_tlbr[key_y]
+        p_x = p_tlbr[key_x]
+        v = gather_elements(g, dcn_params, input, p_y, p_x)
+        v_tlbr[key] = v
+    return v_tlbr
+
+
+def apply_mask(g, dcn_params, v, mask):
+    """Apply mask tensor.
+    """
+    b = dcn_params["batch"]
+    group = dcn_params["n_offset_grps"]
+    out_h = dcn_params["out_h"]
+    out_w = dcn_params["out_w"]
+    K = dcn_params["kernel_area_size"]
+
+    mask = reshape(g, mask, [b, group, 1, K, out_h, out_w])
+    v = mul(g, v, mask)
+    return v
+
+
+def reshape_v_for_conv(g, dcn_params, v):
+    """Reshape v for convolution.
+    """
+    b = dcn_params["batch"]
+    h = dcn_params["out_h"]
+    w = dcn_params["out_w"]
+    ch = dcn_params["in_ch"]
+    kernel_h = dcn_params["kernel_h"]
+    kernel_w = dcn_params["kernel_w"]
+
+    #    (batch, n_offset_grps, in_ch_per_group, K, out_h, out_w)
+    v = reshape(g, v, [b, ch, kernel_h, kernel_w, h, w])
+    v = g.op("Transpose", v, perm_i=[0, 1, 4, 2, 5, 3])
+    return reshape(g, v, [b, ch, h * kernel_h, w * kernel_w])
+
+
+def apply_conv(g, dcn_params, v, weight):
+    """Apply convolution.
+    """
+    weight_groups = dcn_params["n_weight_grps"]
+    kernel_h = dcn_params["kernel_h"]
+    kernel_w = dcn_params["kernel_w"]
+
+    v = g.op("Conv",
+             v,
+             weight,
+             group_i=weight_groups,
+             kernel_shape_i=[kernel_h, kernel_w],
+             strides_i=[kernel_h, kernel_w])
+    return v
+
+
+def apply_bias(g, dcn_params, v, bias):
+    """Apply bias parameter.
+    """
+    bias = unsqueeze(g, bias, [0, 2, 3])
+    v = add(g, v, bias)
+    return v
+
+
+def create_dcn_params(input, weight, offset, mask, bias, stride_h, stride_w,
+                      pad_h, pad_w, dilation_h, dilation_w, n_weight_grps,
+                      n_offset_grps, use_mask):
+    """Manage parameters for DeformConv2d.
+    """
     additional_pad_h = additional_pad_w = 0
     if pad_h == 0:
         additional_pad_h = 1
@@ -306,6 +376,7 @@ def deform_conv2d(g, input, weight, offset, mask, bias, stride_h, stride_w,
         "dilation_h": dilation_h,
         "dilation_w": dilation_w,
         "n_offset_grps": n_offset_grps,
+        "n_weight_grps": n_weight_grps,
 
         # offset data type
         "offset_dtype": offset_dtype,
@@ -317,63 +388,51 @@ def deform_conv2d(g, input, weight, offset, mask, bias, stride_h, stride_w,
         "index_dtype_onnx": index_dtype_onnx,
         "index_dtype_pytorch": index_dtype_pytorch,
 
-        # additional pads
+        # padding
+        "padding_h": pad_h,
+        "padding_w": pad_w,
         "additional_pad_h": additional_pad_h,
         "additional_pad_w": additional_pad_w,
     }
+    return dcn_params
 
-    pad_size = [
-        0,
-        0,
-        (pad_h + additional_pad_h),
-        (pad_w + additional_pad_w),
-        0,
-        0,
-        (pad_h + additional_pad_h),
-        (pad_w + additional_pad_w),
-    ]
-    pad = tensor(g, pad_size, dtype=torch.int64)
-    input = g.op("Pad", input, pad, mode_s="constant")
+
+@sym_help.parse_args("v", "v", "v", "v", "v", "i", "i", "i", "i", "i", "i",
+                     "i", "i", "b")
+def deform_conv2d(g, input, weight, offset, mask, bias, stride_h, stride_w,
+                  pad_h, pad_w, dilation_h, dilation_w, n_weight_grps,
+                  n_offset_grps, use_mask):
+    dcn_params = create_dcn_params(input, weight, offset, mask, bias, stride_h,
+                                   stride_w, pad_h, pad_w, dilation_h,
+                                   dilation_w, n_weight_grps, n_offset_grps,
+                                   use_mask)
 
     p = calculate_p(g, dcn_params, offset)
-    # p.shape is (b, n_offset_grps, kernel_area_size, 2, out_h, out_w)
-
+    # => p.shape is (b, group, K, 2, out_h, out_w)
     p_tl = calculate_p_tl(g, dcn_params, p)
     p_tlbr = calculate_p_tlbr(g, dcn_params, p_tl)
     weight_tlbr = calculate_weight(g, dcn_params, p, p_tl)
-    # ratio_tlbr.shape is (b, n_offset_grps, 1, kernel_area_size, out_h, out_w)
+    # => ratio_tlbr.shape is (b, group, 1, K, out_h, out_w)
 
-    input = reshape(g, input,
-                    [batch, n_offset_grps, in_ch_per_group, in_h, in_w])
-    input = g.op("Transpose", input, perm_i=[0, 1, 3, 4, 2])
-    # input.shape is (b, n_offset_grps, in_h, in_w, in_ch_per_group)
+    input = reshape_input_for_gather_elements(g, dcn_params, input)
+    # => input.shape is (b, group, in_h, in_w, ch)
 
     v_tlbr = gather_elements_tlbr(g, dcn_params, input, p_tlbr)
-    # v_tlbr[x].shape is
-    #  (batch, n_offset_grps, in_ch_per_group, K, out_h, out_w)
+    # => v_tlbr[x].shape is (b, group, ch, K, out_h, out_w)
 
     weighted_v_list = [mul(g, weight_tlbr[key], v_tlbr[key]) for key in v_tlbr]
 
     v = g.op("Sum", *weighted_v_list)
-    #  v.shape is
-    #   (batch, n_offset_grps, in_ch_per_group, K, out_h, out_w)
+    # => v.shape is (b, group, ch, K, out_h, out_w)
 
     if use_mask:
-        mask = reshape(
-            g, mask, [batch, n_offset_grps, 1, kernel_area_size, out_h, out_w])
-        v = mul(g, v, mask)
+        v = apply_mask(g, dcn_params, v, mask)
 
     v = reshape_v_for_conv(g, dcn_params, v)
-    # v.shape is (batch, in_ch, out_h * kernel_h, out_w * kernerl_w)
-    output = g.op("Conv",
-                  v,
-                  weight,
-                  group_i=n_weight_grps,
-                  kernel_shape_i=[kernel_h, kernel_w],
-                  strides_i=[kernel_h, kernel_w])
-    bias = unsqueeze(g, bias, [0, 2, 3])
-    output = add(g, output, bias)
-    return output
+    # => v.shape is (b, in_ch, out_h * kernel_h, out_w * kernerl_w)
+    v = apply_conv(g, dcn_params, v, weight)
+    v = apply_bias(g, dcn_params, v, bias)
+    return v
 
 
 def register_deform_conv2d_op():
