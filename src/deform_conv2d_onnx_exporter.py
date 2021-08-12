@@ -89,9 +89,9 @@ def calculate_p_0(dcn_params):
 
     p_0_y, p_0_x = torch.meshgrid(torch.arange(0, h * stride_h, stride_h),
                                   torch.arange(0, w * stride_w, stride_w))
-    p_0_y = p_0_y.view(1, 1, h, w, 1, 1).repeat(1, 1, 1, 1, K, 1)
-    p_0_x = p_0_x.view(1, 1, h, w, 1, 1).repeat(1, 1, 1, 1, K, 1)
-    return torch.cat([p_0_y, p_0_x], dim=5)
+    p_0_y = p_0_y.view(1, 1, 1, 1, h, w).repeat(1, 1, K, 1, 1, 1)
+    p_0_x = p_0_x.view(1, 1, 1, 1, h, w).repeat(1, 1, K, 1, 1, 1)
+    return torch.cat([p_0_y, p_0_x], dim=3)
 
 
 def calculate_p_k(dcn_params):
@@ -107,9 +107,9 @@ def calculate_p_k(dcn_params):
         torch.arange(0, kernel_h * dilation_h, step=dilation_h),
         torch.arange(0, kernel_w * dilation_w, step=dilation_w),
     )
-    p_k_y = p_k_y.reshape(1, 1, 1, 1, K, 1)
-    p_k_x = p_k_x.reshape(1, 1, 1, 1, K, 1)
-    return torch.cat([p_k_y, p_k_x], dim=5)
+    p_k_y = p_k_y.reshape(1, 1, K, 1, 1, 1)
+    p_k_x = p_k_x.reshape(1, 1, K, 1, 1, 1)
+    return torch.cat([p_k_y, p_k_x], dim=3)
 
 
 def calculate_p_helper(g, dcn_params, p_0, p_k, offset):
@@ -139,15 +139,13 @@ def calculate_p(g, dcn_params, offset):
     group = dcn_params["n_offset_grps"]
     offset_dtype = dcn_params["offset_dtype_pytorch"]
 
-    offset = reshape(g, offset, [b, group, 2 * K, h, w])
-    offset = g.op("Transpose", offset, perm_i=[0, 1, 3, 4, 2])
-    offset = reshape(g, offset, [b, group, h, w, K, 2])
+    offset = reshape(g, offset, [b, group, K, 2, h, w])
 
     p_0 = calculate_p_0(dcn_params)
     p_k = calculate_p_k(dcn_params)
     p = p_0 + p_k
     p = add(g, tensor(g, p.tolist(), dtype=offset_dtype), offset)
-    # => p.shape is (b, group, h, w, K, 2)
+    # => p.shape is (b, group, K, 2, h, w)
     return p
 
 
@@ -160,7 +158,7 @@ def gather_elements(g, dcn_params, input, p_y, p_x, mask_y, mask_x):
     out_h = dcn_params["out_h"]
     out_w = dcn_params["out_w"]
     K = dcn_params["kernel_area_size"]
-    index_dtype_onnx = dcn_params["index_dtype_onnx"]
+    index_dtype_pytorch = dcn_params["index_dtype_pytorch"]
 
     p_y = reshape(g, p_y, [b, group, out_h * out_w * K, 1])
     p_x = reshape(g, p_x, [b, group, out_h * out_w * K, 1])
@@ -168,15 +166,16 @@ def gather_elements(g, dcn_params, input, p_y, p_x, mask_y, mask_x):
     mask_y = reshape(g, mask_y, [b, group, out_h * out_w * K, 1])
     mask_x = reshape(g, mask_x, [b, group, out_h * out_w * K, 1])
     mask = g.op("And", mask_y, mask_x)
-    mask = g.op("Cast", mask, to_i=index_dtype_onnx)
 
     # If an index value is out of bounds, clear it to avoid error.
-    index = mul(g, index, mask)
+    zero = tensor(g, 0, dtype=index_dtype_pytorch)
+    index = g.op("Where", mask, index, zero)
     # => index.shape is (b, group, out_h * out_w * K, 2)
 
     v = g.op("GatherND", input, index, batch_dims_i=2)
     # => v.shape is (b, group, out_h * out_w * K, ch)
-    return reshape(g, v, [b, group, out_h, out_w, K, ch])
+    v = g.op("Transpose", v, perm_i=[0, 1, 3, 2])
+    return reshape(g, v, [b, group, ch, K, out_h, out_w])
 
 
 def gather_elements_tlbr(g, dcn_params, input, p_tlbr, mask_tlbr):
@@ -253,7 +252,8 @@ def reshape_v_for_conv(g, dcn_params, v):
     kernel_w = dcn_params["kernel_w"]
     K = dcn_params["kernel_area_size"]
 
-    v = g.op("Transpose", v, perm_i=[0, 1, 5, 2, 3, 4])
+    #    (batch, n_offset_grps, in_ch_per_group, K, out_h, out_w)
+    v = g.op("Transpose", v, perm_i=[0, 1, 2, 4, 5, 3])
 
     if kernel_h == 1:
         # Split returnes not list of tensor but a tensor
@@ -287,8 +287,8 @@ def calculate_p_tlbr(g, dcn_params, p_tl):
 
     p_tl = g.op("Cast", p_tl, to_i=index_dtype_onnx)
     one = tensor(g, 1, dtype=index_dtype_pytorch)
-    p_t = slice(g, p_tl, [5], [0], [1])
-    p_l = slice(g, p_tl, [5], [1], [2])
+    p_t = slice(g, p_tl, [3], [0], [1])
+    p_l = slice(g, p_tl, [3], [1], [2])
     p_b = add(g, p_t, one)
     p_r = add(g, p_l, one)
     return {
@@ -302,31 +302,44 @@ def calculate_p_tlbr(g, dcn_params, p_tl):
 def calculate_ratio(g, dcn_params, p, p_tl, mask_tlbr):
     """Calculate ratio value for bilinear interpolation.
     """
-    input_dtype = dcn_params["input_dtype_onnx"]
+    b = dcn_params["batch"]
+    group = dcn_params["n_offset_grps"]
+    h = dcn_params["out_h"]
+    w = dcn_params["out_w"]
+    K = dcn_params["kernel_area_size"]
     offset_dtype = dcn_params["offset_dtype_pytorch"]
 
-    one = tensor(g, 1.0, dtype=offset_dtype)
+    one = tensor(g, 1, dtype=offset_dtype)
+    zero = tensor(g, 0, dtype=offset_dtype)
 
     diff = sub(g, p, p_tl)
-    diff_y = slice(g, diff, [5], [0], [1])
-    diff_x = slice(g, diff, [5], [1], [2])
+    diff_y = slice(g, diff, [3], [0], [1])
+    diff_x = slice(g, diff, [3], [1], [2])
     diff_y_inv = sub(g, one, diff_y)
     diff_x_inv = sub(g, one, diff_x)
 
-    mask_tl = g.op("Cast", g.op("And", mask_tlbr["t"], mask_tlbr["l"]), to_i=input_dtype)
-    mask_br = g.op("Cast", g.op("And", mask_tlbr["b"], mask_tlbr["r"]), to_i=input_dtype)
-    mask_bl = g.op("Cast", g.op("And", mask_tlbr["b"], mask_tlbr["l"]), to_i=input_dtype)
-    mask_tr = g.op("Cast", g.op("And", mask_tlbr["t"], mask_tlbr["r"]), to_i=input_dtype)
+    mask_tl = g.op("And", mask_tlbr["t"], mask_tlbr["l"])
+    mask_br = g.op("And", mask_tlbr["b"], mask_tlbr["r"])
+    mask_bl = g.op("And", mask_tlbr["b"], mask_tlbr["l"])
+    mask_tr = g.op("And", mask_tlbr["t"], mask_tlbr["r"])
 
-    # bilinear kernel (b, group, ch, out_h, out_w, kernel_area_size)
+    # bilinear kernel (b, group, K, 1, h, w)
     # (1 - (p_x - p_l)) * (1 - (p_y - p_t))
-    ratio_tl = mul(g, mul(g, diff_x_inv, diff_y_inv), mask_tl)
+    ratio_tl = mul(g, diff_x_inv, diff_y_inv)
+    ratio_tl = g.op("Where", mask_tl, ratio_tl, zero)
+    ratio_tl = reshape(g, ratio_tl, [b, group, 1, K, h, w])
     # (p_x - p_l) * (p_y - p_t)
-    ratio_br = mul(g, mul(g, diff_x, diff_y), mask_br)
+    ratio_br = mul(g, diff_x, diff_y)
+    ratio_br = g.op("Where", mask_br, ratio_br, zero)
+    ratio_br = reshape(g, ratio_br, [b, group, 1, K, h, w])
     # (1 - (p_x - p_l)) * (p_y - p_t)
-    ratio_bl = mul(g, mul(g, diff_x_inv, diff_y), mask_bl)
+    ratio_bl = mul(g, diff_x_inv, diff_y)
+    ratio_bl = g.op("Where", mask_bl, ratio_bl, zero)
+    ratio_bl = reshape(g, ratio_bl, [b, group, 1, K, h, w])
     # (p_x - p_l) * (1 - (p_y - p_t))
-    ratio_tr = mul(g, mul(g, diff_x, diff_y_inv), mask_tr)
+    ratio_tr = mul(g, diff_x, diff_y_inv)
+    ratio_tr = g.op("Where", mask_tr, ratio_tr, zero)
+    ratio_tr = reshape(g, ratio_tr, [b, group, 1, K, h, w])
 
     return {
         "tl": ratio_tl,
@@ -417,31 +430,31 @@ def deform_conv2d(g, input, weight, offset, mask, bias, stride_h, stride_w,
         input = g.op("Pad", input, pad, mode_s="constant")
 
     p = calculate_p(g, dcn_params, offset)
-    # => p.shape is (b, n_offset_grps, out_h, out_w, kernel_area_size, 2)
+    # => p.shape is (b, n_offset_grps, kernel_area_size, 2, out_h, out_w)
 
     p_tl = calculate_p_tl(g, dcn_params, p)
     p_tlbr = calculate_p_tlbr(g, dcn_params, p_tl)
     mask_tlbr = create_clipping_mask(g, dcn_params, p_tlbr)
     ratio_tlbr = calculate_ratio(g, dcn_params, p, p_tl, mask_tlbr)
+    # ratio_tlbr.shape is (b, n_offset_grps, 1, kernel_area_size, out_h, out_w)
 
     input = reshape(g, input,
                     [batch, n_offset_grps, in_ch_per_group, in_h, in_w])
     input = g.op("Transpose", input, perm_i=[0, 1, 3, 4, 2])
     # => input.shape is (b, group, h, w, ch)
 
-    # (b, group, in_ch_per_group, out_h, out_w, kernel_area_size)
     v_tlbr = gather_elements_tlbr(g, dcn_params, input, p_tlbr, mask_tlbr)
+    # ([b, group, ch, K, out_h, out_w])
 
     weighted_v_list = [mul(g, ratio_tlbr[key], v_tlbr[key]) for key in v_tlbr]
 
     v = g.op("Sum", *weighted_v_list)
     # => v.shape is
-    #    (batch, n_offset_grps, in_ch_per_group out_h, out_w, kernel_area_size)
+    #    (batch, n_offset_grps, in_ch_per_group, K, out_h, out_w)
 
     if use_mask:
         mask = reshape(
-            g, mask, [batch, n_offset_grps, kernel_area_size, out_h, out_w, 1])
-        mask = g.op("Transpose", mask, perm_i=[0, 1, 3, 4, 2, 5])
+            g, mask, [batch, n_offset_grps, 1, kernel_area_size, out_h, out_w])
         v = mul(g, v, mask)
 
     v = reshape_v_for_conv(g, dcn_params, v)
