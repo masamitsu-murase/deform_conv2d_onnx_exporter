@@ -158,18 +158,19 @@ def gather_elements(g, dcn_params, input, p_y, p_x, mask_y, mask_x):
     out_h = dcn_params["out_h"]
     out_w = dcn_params["out_w"]
     K = dcn_params["kernel_area_size"]
-    index_dtype_pytorch = dcn_params["index_dtype_pytorch"]
+    index_dtype_onnx = dcn_params["index_dtype_onnx"]
 
-    p_y = reshape(g, p_y, [b, group, out_h * out_w * K, 1])
-    p_x = reshape(g, p_x, [b, group, out_h * out_w * K, 1])
-    index = g.op("Concat", p_y, p_x, axis_i=3)
     mask_y = reshape(g, mask_y, [b, group, out_h * out_w * K, 1])
     mask_x = reshape(g, mask_x, [b, group, out_h * out_w * K, 1])
     mask = g.op("And", mask_y, mask_x)
+    mask = g.op("Cast", mask, to_i=index_dtype_onnx)
 
     # If an index value is out of bounds, clear it to avoid error.
-    zero = tensor(g, 0, dtype=index_dtype_pytorch)
-    index = g.op("Where", mask, index, zero)
+    p_y = reshape(g, p_y, [b, group, out_h * out_w * K, 1])
+    p_y = mul(g, p_y, mask)
+    p_x = reshape(g, p_x, [b, group, out_h * out_w * K, 1])
+    p_x = mul(g, p_x, mask)
+    index = g.op("Concat", p_y, p_x, axis_i=3)
     # => index.shape is (b, group, out_h * out_w * K, 2)
 
     v = g.op("GatherND", input, index, batch_dims_i=2)
@@ -308,6 +309,7 @@ def calculate_ratio(g, dcn_params, p, p_tl, mask_tlbr):
     w = dcn_params["out_w"]
     K = dcn_params["kernel_area_size"]
     offset_dtype = dcn_params["offset_dtype_pytorch"]
+    offset_dtype_onnx = dcn_params["offset_dtype_onnx"]
 
     one = tensor(g, 1, dtype=offset_dtype)
     zero = tensor(g, 0, dtype=offset_dtype)
@@ -319,26 +321,30 @@ def calculate_ratio(g, dcn_params, p, p_tl, mask_tlbr):
     diff_x_inv = sub(g, one, diff_x)
 
     mask_tl = g.op("And", mask_tlbr["t"], mask_tlbr["l"])
+    mask_tl = g.op("Cast", mask_tl, to_i=offset_dtype_onnx)
     mask_br = g.op("And", mask_tlbr["b"], mask_tlbr["r"])
+    mask_br = g.op("Cast", mask_br, to_i=offset_dtype_onnx)
     mask_bl = g.op("And", mask_tlbr["b"], mask_tlbr["l"])
+    mask_bl = g.op("Cast", mask_bl, to_i=offset_dtype_onnx)
     mask_tr = g.op("And", mask_tlbr["t"], mask_tlbr["r"])
+    mask_tr = g.op("Cast", mask_tr, to_i=offset_dtype_onnx)
 
     # bilinear kernel (b, group, K, 1, h, w)
     # (1 - (p_x - p_l)) * (1 - (p_y - p_t))
     ratio_tl = mul(g, diff_x_inv, diff_y_inv)
-    ratio_tl = g.op("Where", mask_tl, ratio_tl, zero)
+    ratio_tl = mul(g, ratio_tl, mask_tl)
     ratio_tl = reshape(g, ratio_tl, [b, group, 1, K, h, w])
     # (p_x - p_l) * (p_y - p_t)
     ratio_br = mul(g, diff_x, diff_y)
-    ratio_br = g.op("Where", mask_br, ratio_br, zero)
+    ratio_br = mul(g, ratio_br, mask_br)
     ratio_br = reshape(g, ratio_br, [b, group, 1, K, h, w])
     # (1 - (p_x - p_l)) * (p_y - p_t)
     ratio_bl = mul(g, diff_x_inv, diff_y)
-    ratio_bl = g.op("Where", mask_bl, ratio_bl, zero)
+    ratio_bl = mul(g, ratio_bl, mask_bl)
     ratio_bl = reshape(g, ratio_bl, [b, group, 1, K, h, w])
     # (p_x - p_l) * (1 - (p_y - p_t))
     ratio_tr = mul(g, diff_x, diff_y_inv)
-    ratio_tr = g.op("Where", mask_tr, ratio_tr, zero)
+    ratio_tr = mul(g, ratio_tr, mask_tr)
     ratio_tr = reshape(g, ratio_tr, [b, group, 1, K, h, w])
 
     return {
