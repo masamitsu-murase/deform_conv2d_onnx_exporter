@@ -86,11 +86,15 @@ def calculate_p_0(dcn_params):
     stride_h = dcn_params["stride_h"]
     stride_w = dcn_params["stride_w"]
     K = dcn_params["kernel_area_size"]
+    additional_pad_h = dcn_params["additional_pad_h"]
+    additional_pad_w = dcn_params["additional_pad_w"]
 
     p_0_y, p_0_x = torch.meshgrid(torch.arange(0, h * stride_h, stride_h),
                                   torch.arange(0, w * stride_w, stride_w))
     p_0_y = p_0_y.view(1, 1, 1, 1, h, w).repeat(1, 1, K, 1, 1, 1)
+    p_0_y += additional_pad_h
     p_0_x = p_0_x.view(1, 1, 1, 1, h, w).repeat(1, 1, K, 1, 1, 1)
+    p_0_x += additional_pad_w
     return torch.cat([p_0_y, p_0_x], dim=3)
 
 
@@ -110,23 +114,6 @@ def calculate_p_k(dcn_params):
     p_k_y = p_k_y.reshape(1, 1, K, 1, 1, 1)
     p_k_x = p_k_x.reshape(1, 1, K, 1, 1, 1)
     return torch.cat([p_k_y, p_k_x], dim=3)
-
-
-def calculate_p_helper(g, dcn_params, p_0, p_k, offset):
-    b = dcn_params["batch"]
-    K = dcn_params["kernel_area_size"]
-    h = dcn_params["out_h"]
-    w = dcn_params["out_w"]
-    group = dcn_params["n_offset_grps"]
-    offset_dtype = dcn_params["offset_dtype_pytorch"]
-
-    p = p_0 + p_k
-    # => p.shape is (1, 1, K, h, w)
-    p = add(g, tensor(g, p.tolist(), dtype=offset_dtype), offset)
-    p = g.op("Transpose", p, perm_i=[0, 1, 3, 4, 2])
-    # => p.shape is (b, group, h, w, K)
-    p = reshape(g, p, [b, group, h, w, K, 1])
-    return p
 
 
 def calculate_p(g, dcn_params, offset):
@@ -467,7 +454,7 @@ def deform_conv2d(g, input, weight, offset, mask, bias, stride_h, stride_w,
         v = mul(g, v, mask)
 
     v = reshape_v_for_conv(g, dcn_params, v)
-    # => v.shape is (batch, in_ch, in_h * kernel_h, in_w * kernerl_w)
+    # => v.shape is (batch, in_ch, out_h * kernel_h, out_w * kernerl_w)
     output = g.op("Conv",
                   v,
                   weight,

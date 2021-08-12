@@ -95,10 +95,9 @@ class DeformConv2dOpTestCase(unittest.TestCase):
             return model.run(["output"], input_params)[0]
         finally:
             end = time.perf_counter()
-            print("time: ", end - start)
+            # print("time: ", end - start)
 
     def run_with_dcn_params(self, dcn_params, message=""):
-        print(dcn_params)
         input, offset, mask = self.create_input_params(dcn_params)
         pytorch_model = self.create_pytorch_model(dcn_params)
         if dcn_params["use_mask"]:
@@ -156,8 +155,8 @@ class DeformConv2dOpTestCase(unittest.TestCase):
             "kernel_w": random.randrange(1, 8),
             "stride_h": random.randrange(1, 5),
             "stride_w": random.randrange(1, 5),
-            "padding_h": random.randrange(1, 5),
-            "padding_w": random.randrange(1, 5),
+            "padding_h": random.randrange(0, 5),
+            "padding_w": random.randrange(0, 5),
             "dilation_h": random.randrange(1, 4),
             "dilation_w": random.randrange(1, 4),
             "groups": random.randrange(1, 4),
@@ -179,7 +178,11 @@ class DeformConv2dOpTestCase(unittest.TestCase):
             dcn_params["stride_w"]) + 1
         return dcn_params
 
-    def xtest_random_parameters(self):
-        for _ in range(10):
+    def test_random_parameters(self):
+        for _ in range(100):
             dcn_params = self.generate_random_parameters()
-            self.run_with_dcn_params(dcn_params)
+            try:
+                self.run_with_dcn_params(dcn_params)
+            except AssertionError:
+                print(dcn_params)
+                raise
