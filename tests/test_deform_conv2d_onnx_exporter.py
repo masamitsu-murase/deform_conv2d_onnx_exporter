@@ -179,7 +179,7 @@ class DeformConv2dOpTestCase(unittest.TestCase):
         return dcn_params
 
     def test_random_parameters(self):
-        for _ in range(100):
+        for _ in range(10):
             dcn_params = self.generate_random_parameters()
             try:
                 self.run_with_dcn_params(dcn_params)

@@ -56,7 +56,6 @@ def tensor(g, value, dtype):
     return g.op("Constant", value_t=torch.tensor(value, dtype=dtype))
 
 
-
 def calculate_p_0(dcn_params):
     """Calculate p_0 value in equation (1) in the paper.
     """
@@ -150,21 +149,8 @@ def gather_elements_tlbr(g, dcn_params, input, p_tlbr):
     return v_tlbr
 
 
-
 def reshape_v_for_conv(g, dcn_params, v):
     """Reshape v for convolution.
-
-    e.g. If kernel_size is 3, reshape
-       1  2  3  4  5  6  7  8  9
-      10 11 12 13 14 15 16 17 18
-      19 20 21 22 23 24 25 26 27
-      ...
-    to
-       1  2  3 10 11 12 19 20 21
-       4  5  6 13 14 15 22 23 24
-       7  8  9 16 17 18 25 26 27
-      28 29 30 37 38 39 46 47 48
-      ...
     """
     b = dcn_params["batch"]
     h = dcn_params["out_h"]
@@ -175,23 +161,9 @@ def reshape_v_for_conv(g, dcn_params, v):
     K = dcn_params["kernel_area_size"]
 
     #    (batch, n_offset_grps, in_ch_per_group, K, out_h, out_w)
-    v = g.op("Transpose", v, perm_i=[0, 1, 2, 4, 5, 3])
-
-    if kernel_h == 1:
-        # Split returnes not list of tensor but a tensor
-        # if kernel_h == 1.
-        return reshape(g, v, [b, ch, h * kernel_h, w * kernel_w])
-
-    v = reshape(g, v, [b, ch, h, w, K])
-    items = g.op("Split",
-                 v,
-                 split_i=[kernel_w] * kernel_h,
-                 axis_i=4,
-                 outputs=kernel_h)
-    shape = tensor(g, [b, ch, h, w * kernel_w], dtype=torch.int64)
-    items = [reshape(g, item, shape) for item in items]
-    concatnated_v = g.op("Concat", *items, axis_i=3)
-    return reshape(g, concatnated_v, [b, ch, h * kernel_h, w * kernel_w])
+    v = reshape(g, v, [b, ch, kernel_h, kernel_w, h, w])
+    v = g.op("Transpose", v, perm_i=[0, 1, 4, 2, 5, 3])
+    return reshape(g, v, [b, ch, h * kernel_h, w * kernel_w])
 
 
 def calculate_p_tl(g, dcn_params, p):
