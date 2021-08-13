@@ -218,4 +218,4 @@ class DeformConv2dOpTestCase(unittest.TestCase):
             dcn_params = self.generate_dcn_parameters()
             pytorch_result, onnx_result = self.run_with_dcn_params(dcn_params)
             self.assert_result(pytorch_result, onnx_result,
-                               f"randaom parameters: {dcn_params}")
+                               f"random parameters: {dcn_params}")
