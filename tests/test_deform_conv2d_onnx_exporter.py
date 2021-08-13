@@ -1,4 +1,5 @@
 import io
+import math
 import random
 import unittest
 
@@ -10,7 +11,7 @@ from torchvision.ops.deform_conv import DeformConv2d
 
 import deform_conv2d_onnx_exporter
 
-deform_conv2d_onnx_exporter.register_deform_conv2d_op()
+deform_conv2d_onnx_exporter.register_deform_conv2d_onnx_op()
 
 
 def tonumpy(tensor):
@@ -89,60 +90,28 @@ class DeformConv2dOpTestCase(unittest.TestCase):
         }
         if mask is not None:
             input_params["mask"] = tonumpy(mask)
-        import time
-        start = time.perf_counter()
-        try:
-            return model.run(["output"], input_params)[0]
-        finally:
-            end = time.perf_counter()
-            # print("time: ", end - start)
+        return model.run(["output"], input_params)[0]
 
     def run_with_dcn_params(self, dcn_params, message=""):
         input, offset, mask = self.create_input_params(dcn_params)
         pytorch_model = self.create_pytorch_model(dcn_params)
-        if dcn_params["use_mask"]:
-            pytorch_output = self.run_pytorch_model(pytorch_model, input,
-                                                    offset, mask)
-            onnx_model = self.convert_to_onnx_model(pytorch_model, input,
-                                                    offset, mask)
-            onnx_output = self.run_onnx_model(onnx_model, input, offset, mask)
-        else:
-            pytorch_output = self.run_pytorch_model(pytorch_model, input,
-                                                    offset)
-            onnx_model = self.convert_to_onnx_model(pytorch_model, input,
-                                                    offset)
-            onnx_output = self.run_onnx_model(onnx_model, input, offset)
+        if not dcn_params["use_mask"]:
+            mask = None
+        pytorch_output = self.run_pytorch_model(pytorch_model, input, offset,
+                                                mask)
+        onnx_model = self.convert_to_onnx_model(pytorch_model, input, offset,
+                                                mask)
+        onnx_output = self.run_onnx_model(onnx_model, input, offset, mask)
 
-        pytorch_output_np = tonumpy(pytorch_output)
+        return pytorch_output, onnx_output
+
+    def assert_result(self, pytorch_result, onnx_result, message=""):
+        pytorch_result = tonumpy(pytorch_result)
         self.assertTrue(
-            np.allclose(pytorch_output_np, onnx_output, rtol=1e-03,
-                        atol=1e-05), message)
+            np.allclose(pytorch_result, onnx_result, rtol=1e-03, atol=1e-05),
+            message)
 
-    def test_full_parameters(self):
-        dcn_params = {
-            "batch": 3,
-            "input_ch": 32,
-            "input_h": 224,
-            "input_w": 200,
-            "output_ch": 16,
-            "output_h": 112,
-            "output_w": 66,
-            "kernel_h": 3,
-            "kernel_w": 4,
-            "stride_h": 2,
-            "stride_w": 3,
-            "padding_h": 1,
-            "padding_w": 2,
-            "dilation_h": 1,
-            "dilation_w": 2,
-            "groups": 2,
-            "n_offset_grps": 2,
-            "bias": True,
-            "use_mask": True,
-        }
-        self.run_with_dcn_params(dcn_params)
-
-    def generate_random_parameters(self):
+    def generate_dcn_parameters(self, base_dcn_params={}):
         dcn_params = {
             "batch": random.randrange(1, 6),
             # "input_ch": 0,
@@ -164,25 +133,75 @@ class DeformConv2dOpTestCase(unittest.TestCase):
             "bias": random.choice([True, False]),
             "use_mask": random.choice([True, False]),
         }
-        dcn_params["input_ch"] = dcn_params["groups"] * dcn_params[
-            "n_offset_grps"] * random.randrange(1, 17)
-        dcn_params["output_ch"] = dcn_params["groups"] * random.randrange(
-            1, 17)
+        dcn_params.update(base_dcn_params)
+
+        if "input_ch" not in dcn_params:
+            dcn_params["input_ch"] = math.lcm(
+                dcn_params["groups"],
+                dcn_params["n_offset_grps"]) * random.randrange(1, 17)
+        if "output_ch" not in dcn_params:
+            dcn_params["output_ch"] = dcn_params["groups"] * random.randrange(
+                1, 17)
         ker_h = dcn_params["dilation_h"] * (dcn_params["kernel_h"] - 1) + 1
-        dcn_params["output_h"] = (
-            (dcn_params["input_h"] + 2 * dcn_params["padding_h"] - ker_h) //
-            dcn_params["stride_h"]) + 1
+        if "output_h" not in dcn_params:
+            dcn_params["output_h"] = (
+                (dcn_params["input_h"] + 2 * dcn_params["padding_h"] - ker_h)
+                // dcn_params["stride_h"]) + 1
         ker_w = dcn_params["dilation_w"] * (dcn_params["kernel_w"] - 1) + 1
-        dcn_params["output_w"] = (
-            (dcn_params["input_w"] + 2 * dcn_params["padding_w"] - ker_w) //
-            dcn_params["stride_w"]) + 1
+        if "output_w" not in dcn_params:
+            dcn_params["output_w"] = (
+                (dcn_params["input_w"] + 2 * dcn_params["padding_w"] - ker_w)
+                // dcn_params["stride_w"]) + 1
         return dcn_params
 
+    def test_no_padding(self):
+        dcn_params = {"padding_h": 0, "padding_w": 2}
+        dcn_params = self.generate_dcn_parameters(dcn_params)
+        pytorch_result, onnx_result = self.run_with_dcn_params(dcn_params)
+        self.assert_result(pytorch_result, onnx_result,
+                           f"no padding_h: {dcn_params}")
+
+        dcn_params = {"padding_h": 1, "padding_w": 0}
+        dcn_params = self.generate_dcn_parameters(dcn_params)
+        pytorch_result, onnx_result = self.run_with_dcn_params(dcn_params)
+        self.assert_result(pytorch_result, onnx_result,
+                           f"no padding_w: {dcn_params}")
+
+        dcn_params = {"padding_h": 0, "padding_w": 0}
+        dcn_params = self.generate_dcn_parameters(dcn_params)
+        pytorch_result, onnx_result = self.run_with_dcn_params(dcn_params)
+        self.assert_result(pytorch_result, onnx_result,
+                           f"no paddings: {dcn_params}")
+
+    def test_full_parameters(self):
+        dcn_params = {
+            "batch": 8,
+            "input_ch": 64,
+            "input_h": 300,
+            "input_w": 200,
+            "output_w": 66,
+            "kernel_h": 3,
+            "kernel_w": 4,
+            "stride_h": 2,
+            "stride_w": 3,
+            "padding_h": 0,
+            "padding_w": 2,
+            "dilation_h": 1,
+            "dilation_w": 2,
+            "groups": 2,
+            "n_offset_grps": 2,
+            "bias": True,
+            "use_mask": True,
+        }
+        dcn_params = self.generate_dcn_parameters(dcn_params)
+        pytorch_result, onnx_result = self.run_with_dcn_params(dcn_params)
+        self.assert_result(pytorch_result, onnx_result,
+                           f"full test: {dcn_params}")
+
     def test_random_parameters(self):
-        for _ in range(10):
-            dcn_params = self.generate_random_parameters()
-            try:
-                self.run_with_dcn_params(dcn_params)
-            except AssertionError:
-                print(dcn_params)
-                raise
+        test_count = 10
+        for _ in range(test_count):
+            dcn_params = self.generate_dcn_parameters()
+            pytorch_result, onnx_result = self.run_with_dcn_params(dcn_params)
+            self.assert_result(pytorch_result, onnx_result,
+                               f"randaom parameters: {dcn_params}")
