@@ -3,16 +3,22 @@
 This module implements Deformable Convolution v2,
 described in a paper, `Deformable ConvNets v2: More Deformable, Better Results
 <https://arxiv.org/abs/1811.11168>`, using ONNX operators.
-The implementation is straightforward, but may not be efficient.
+The implementation is straightforward, but may not be very efficient.
+
+This exporter requires opset version 12 to support the following operators:
+  - Clip:
+    It can accept tensor(int64) from version 12.
+  - GatherND:
+    It can support batch_dims from version 12.
 """
 
 import torch
 from torch.onnx import register_custom_op_symbolic
 from torch.onnx import symbolic_helper as sym_help
 
-__all__ = ["register_deform_conv2d_op"]
+__all__ = ["register_deform_conv2d_onnx_op"]
 
-onnx_opset_version = 11
+onnx_opset_version = 12
 
 
 def add(g, lhs, rhs):
@@ -57,7 +63,14 @@ def tensor(g, value, dtype):
 
 
 def calculate_p_0(dcn_params):
-    """Calculate p_0 value in equation (1) in the paper.
+    """
+    Calculate p_0 value in equation (1) in the paper.
+
+    Args:
+        dcn_params: parameters for deform_conv2d.
+
+    Returns:
+        torch.Tensor[1, 1, kernel_area_size, 2, out_h, out_w]
     """
     h = dcn_params["out_h"]
     w = dcn_params["out_w"]
@@ -77,7 +90,14 @@ def calculate_p_0(dcn_params):
 
 
 def calculate_p_k(dcn_params):
-    """Calculate p_k value in equation (1) in the paper.
+    """
+    Calculate p_k value in equation (1) in the paper.
+
+    Args:
+        dcn_params: parameters for deform_conv2d.
+
+    Returns:
+        torch.Tensor[1, 1, kernel_area_size, 2, 1, 1]
     """
     kernel_h = dcn_params["kernel_h"]
     kernel_w = dcn_params["kernel_w"]
@@ -95,7 +115,17 @@ def calculate_p_k(dcn_params):
 
 
 def calculate_p(g, dcn_params, offset):
-    """Calculate p_0 + p_k + Delta(p_k) in equation (1) in the paper.
+    """
+    Calculate p_0 + p_k + Delta(p_k) in equation (1) in the paper.
+
+    Args:
+        g: graph object.
+        dcn_params: parameters for deform_conv2d.
+        offset: Delta(p_k) in the paper.
+            The shape is (b, group, K, 2, out_h, out_w).
+
+    Returns:
+        The shape is (b, group, K, 2, out_h, out_w).
     """
     b = dcn_params["batch"]
     K = dcn_params["kernel_area_size"]
@@ -114,26 +144,49 @@ def calculate_p(g, dcn_params, offset):
     return p
 
 
-def calculate_p_tl(g, dcn_params, p):
-    """Calculate floor of p.
+def calculate_p_floor(g, dcn_params, p):
     """
-    p_tl = g.op("Floor", p)
-    return p_tl
+    Calculate floor of p.
+
+    Args:
+        g: graph object.
+        dcn_params: parameters for deform_conv2d.
+        p: Coords for sampling points of DCN.
+            The shape is (b, group, K, 2, out_h, out_w).
+
+    Returns:
+        The shape is (b, group, K, 2, out_h, out_w).
+        Note that the data type is not integer but float.
+    """
+    p_floor = g.op("Floor", p)
+    return p_floor
 
 
-def calculate_p_tlbr(g, dcn_params, p_tl):
-    """Calculate floor and ceil of p.
+def calculate_p_tlbr(g, dcn_params, p_floor):
+    """
+    Calculate floor and ceil of p.
+
+    Args:
+        g: graph object.
+        dcn_params: parameters for deform_conv2d.
+        p_floor: Floored coords for sampling points of DCN.
+            The shape is (b, group, K, 2, out_h, out_w).
+
+    Returns:
+        A dict, {"t": p_t, "l", p_l, "b": p_b, "r": p_r}, which contains
+        "t"op, "l"eft, "b"ottom, and "r"ight coordinates around p.
+        The shape of p_t, ..., p_r is (b, group, K, 1, out_h, out_w).
     """
     h = dcn_params["in_h"]
     w = dcn_params["in_w"]
     index_dtype_onnx = dcn_params["index_dtype_onnx"]
     index_dtype_pytorch = dcn_params["index_dtype_pytorch"]
 
-    p_tl = g.op("Cast", p_tl, to_i=index_dtype_onnx)
+    p_floor = g.op("Cast", p_floor, to_i=index_dtype_onnx)
     one = tensor(g, 1, dtype=index_dtype_pytorch)
 
-    p_t = slice(g, p_tl, [3], [0], [1])
-    p_l = slice(g, p_tl, [3], [1], [2])
+    p_t = slice(g, p_floor, [3], [0], [1])
+    p_l = slice(g, p_floor, [3], [1], [2])
     p_b = add(g, p_t, one)
     p_r = add(g, p_l, one)
 
@@ -155,8 +208,22 @@ def calculate_p_tlbr(g, dcn_params, p_tl):
     }
 
 
-def calculate_weight(g, dcn_params, p, p_tl):
-    """Calculate weight value for bilinear interpolation.
+def calculate_weight(g, dcn_params, p, p_floor):
+    """
+    Calculate weight value for bilinear interpolation.
+
+    Args:
+        g: graph object.
+        dcn_params: parameters for deform_conv2d.
+        p: Coords for sampling points.
+            The shape is (b, group, K, 2, out_h, out_w).
+        p_floor: Floored coords for sampling points.
+            The shape is (b, group, K, 2, out_h, out_w).
+
+    Returns:
+        A dict, {"tl": weight_tl, "br": weight_br, ..., "tr": weight_tr},
+        which contains weights for "t"op-"l"eft, "b"ottom-"r"ight, ....
+        The shape of weight_tl is (b, group, 1, K, out_h, out_w).
     """
     b = dcn_params["batch"]
     group = dcn_params["n_offset_grps"]
@@ -167,7 +234,7 @@ def calculate_weight(g, dcn_params, p, p_tl):
 
     one = tensor(g, 1, dtype=offset_dtype)
 
-    diff = sub(g, p, p_tl)
+    diff = sub(g, p, p_floor)
     diff_y = slice(g, diff, [3], [0], [1])
     diff_x = slice(g, diff, [3], [1], [2])
     diff_y_inv = sub(g, one, diff_y)
@@ -176,27 +243,44 @@ def calculate_weight(g, dcn_params, p, p_tl):
     # bilinear kernel (b, group, K, 1, h, w)
     # (1 - (p_x - p_l)) * (1 - (p_y - p_t))
     weight_tl = mul(g, diff_x_inv, diff_y_inv)
-    weight_tl = reshape(g, weight_tl, [b, group, 1, K, h, w])
     # (p_x - p_l) * (p_y - p_t)
     weight_br = mul(g, diff_x, diff_y)
-    weight_br = reshape(g, weight_br, [b, group, 1, K, h, w])
     # (1 - (p_x - p_l)) * (p_y - p_t)
     weight_bl = mul(g, diff_x_inv, diff_y)
-    weight_bl = reshape(g, weight_bl, [b, group, 1, K, h, w])
     # (p_x - p_l) * (1 - (p_y - p_t))
     weight_tr = mul(g, diff_x, diff_y_inv)
-    weight_tr = reshape(g, weight_tr, [b, group, 1, K, h, w])
 
-    return {
+    weights = {
         "tl": weight_tl,
         "br": weight_br,
         "bl": weight_bl,
         "tr": weight_tr,
     }
+    weights = {
+        key: reshape(g, weight, [b, group, 1, K, h, w])
+        for key, weight in weights.items()
+    }
+    return weights
 
 
 def reshape_input_for_gather_elements(g, dcn_params, input):
-    """Reshape input for gather_elements function.
+    """
+    Reshape input for gather_elements function.
+
+    Even if no padding is specified, 1 padding is always added
+    to ensure that out-of-bounds index can be handled correctly.
+
+    This function also transpose input tensor, so that "GatherND"
+    can easily gather all data in a channel.
+
+    Args:
+        g: graph object.
+        dcn_params: parameters for deform_conv2d.
+        input: input tensor.
+            The shape is (b, in_ch, in_h, in_w)
+
+    Returns:
+        The shape is (b, group, in_h, in_w, ch_per_group).
     """
     b = dcn_params["batch"]
     group = dcn_params["n_offset_grps"]
@@ -227,7 +311,21 @@ def reshape_input_for_gather_elements(g, dcn_params, input):
 
 
 def gather_elements(g, dcn_params, input, p_y, p_x):
-    """Gather elements specified p_y and p_x.
+    """
+    Gather elements specified p_y and p_x.
+
+    Args:
+        g: graph object.
+        dcn_params: parameters for deform_conv2d.
+        input: input tensor.
+            The shape is (b, group, in_h, in_w, ch_per_group).
+        p_y: y coordinates of sampling points.
+            The shape is (b, group, K, 1, out_h, out_w).
+        p_x: x coordinates of sampling points.
+            The shape is (b, group, K, 1, out_h, out_w).
+
+    Returns:
+        The shape is (b, group, ch_per_group, K, out_h, out_w).
     """
     b = dcn_params["batch"]
     group = dcn_params["n_offset_grps"]
@@ -236,24 +334,40 @@ def gather_elements(g, dcn_params, input, p_y, p_x):
     out_w = dcn_params["out_w"]
     K = dcn_params["kernel_area_size"]
 
-    p_y = reshape(g, p_y, [b, group, out_h * out_w * K, 1])
-    p_x = reshape(g, p_x, [b, group, out_h * out_w * K, 1])
+    p_y = reshape(g, p_y, [b, group, K * out_h * out_w, 1])
+    p_x = reshape(g, p_x, [b, group, K * out_h * out_w, 1])
     index = g.op("Concat", p_y, p_x, axis_i=3)
-    # => index.shape is (b, group, out_h * out_w * K, 2)
+    # => index.shape is (b, group, K * out_h * out_w, 2)
 
     v = g.op("GatherND", input, index, batch_dims_i=2)
-    # => v.shape is (b, group, out_h * out_w * K, ch)
+    # => v.shape is (b, group, K * out_h * out_w, ch)
     v = g.op("Transpose", v, perm_i=[0, 1, 3, 2])
     v = reshape(g, v, [b, group, ch, K, out_h, out_w])
     return v
 
 
 def gather_elements_tlbr(g, dcn_params, input, p_tlbr):
-    """Gather elements specified by p_tlbr.
     """
-    patterns = ["tl", "br", "bl", "tr"]
+    Gather elements specified by p_tlbr.
+
+    Args:
+        g: graph object.
+        dcn_params: parameters for deform_conv2d.
+        input: input tensor.
+            The shape is (b, group, in_h, in_w, ch_per_group).
+        p_tlbr: A dict, {"t": p_t, "l", p_l, "b": p_b, "r": p_r},
+            which contains "t"op, "l"eft, "b"ottom, and "r"ight
+            coordinates around p.
+            The shape of p_t, ..., p_r is (b, group, K, 1, out_h, out_w).
+
+    Returns:
+        A dict, {"tl": v_tl, "br": v_br, ..., "tr": v_tr}, which contains
+        gathred elements.
+        The shape of v_tl is (b, group, ch_per_group, K, out_h, out_w).
+    """
+    tlbr = ["tl", "br", "bl", "tr"]
     v_tlbr = {}
-    for key in patterns:
+    for key in tlbr:
         key_y = key[0]  # "t" or "b"
         key_x = key[1]  # "l" or "r"
         p_y = p_tlbr[key_y]
@@ -263,8 +377,42 @@ def gather_elements_tlbr(g, dcn_params, input, p_tlbr):
     return v_tlbr
 
 
+def calculate_weighted_sum(g, dcn_params, v_tlbr, weight_tlbr):
+    """
+    Calculate sum of weighted tensors.
+
+    Args:
+        g: graph object.
+        dcn_params: parameters for deform_conv2d.
+        v_tlbr: a dict, {"tl": v_tl, "br": v_br, ..., "tr": v_tr}, which
+            contains gathred elements.
+            The shape of v_tl is (b, group, ch_per_group, K, out_h, out_w).
+        weight_tlbr: a dict, {"tl": weight_tl, "br": weight_br, ...},
+            which contains weights for "t"op-"l"eft, "b"ottom-"r"ight, ....
+            The shape of weight_tl is (b, group, 1, K, out_h, out_w).
+
+    Returns:
+        The shape is (b, group, ch_per_group, K, out_h, out_w).
+    """
+    weighted_v_list = [mul(g, weight_tlbr[key], v_tlbr[key]) for key in v_tlbr]
+    v = g.op("Sum", *weighted_v_list)
+    return v
+
+
 def apply_mask(g, dcn_params, v, mask):
-    """Apply mask tensor.
+    """
+    Apply mask tensor.
+
+    Args:
+        g: graph object.
+        dcn_params: parameters for deform_conv2d.
+        v: input tensor.
+            The shape is (b, group, ch_per_group, K, out_h, out_w).
+        mask: mask tensor.
+            The shape is (b, group * K, out_h, out_w).
+
+    Returns:
+        The shape is (b, group, ch_per_group, K, out_h, out_w).
     """
     b = dcn_params["batch"]
     group = dcn_params["n_offset_grps"]
@@ -278,7 +426,17 @@ def apply_mask(g, dcn_params, v, mask):
 
 
 def reshape_v_for_conv(g, dcn_params, v):
-    """Reshape v for convolution.
+    """
+    Reshape v for convolution.
+
+    Args:
+        g: graph object.
+        dcn_params: parameters for deform_conv2d.
+        v: a reshaped tensor.
+            The shape is (b, group, ch_per_group, K, out_h, out_w).
+
+    Returns:
+        The shape is (b, in_ch, out_h * kernel_h, out_w * kernel_w).
     """
     b = dcn_params["batch"]
     h = dcn_params["out_h"]
@@ -287,14 +445,25 @@ def reshape_v_for_conv(g, dcn_params, v):
     kernel_h = dcn_params["kernel_h"]
     kernel_w = dcn_params["kernel_w"]
 
-    #    (batch, n_offset_grps, in_ch_per_group, K, out_h, out_w)
     v = reshape(g, v, [b, ch, kernel_h, kernel_w, h, w])
     v = g.op("Transpose", v, perm_i=[0, 1, 4, 2, 5, 3])
     return reshape(g, v, [b, ch, h * kernel_h, w * kernel_w])
 
 
 def apply_conv(g, dcn_params, v, weight):
-    """Apply convolution.
+    """
+    Apply convolution.
+
+    Args:
+        g: graph object.
+        dcn_params: parameters for deform_conv2d.
+        v: input tensor.
+            The shape is (b, in_ch, out_h * kernel_h, out_w * kernel_w).
+        weight: weight for convolution.
+            The shape is (out_ch, ch_per_group, kernel_h, kernel_w).
+
+    Returns:
+        The shape is (b, out_ch, out_h, out_w).
     """
     weight_groups = dcn_params["n_weight_grps"]
     kernel_h = dcn_params["kernel_h"]
@@ -310,7 +479,19 @@ def apply_conv(g, dcn_params, v, weight):
 
 
 def apply_bias(g, dcn_params, v, bias):
-    """Apply bias parameter.
+    """
+    Apply bias parameter.
+
+    Args:
+        g: graph object.
+        dcn_params: parameters for deform_conv2d.
+        v: input tensor.
+            The shape is (b, out_ch, out_h, out_w).
+        bias: bias tensor.
+            The shape is (out_ch,).
+
+    Returns:
+        The shape is (b, out_ch, out_h, out_w).
     """
     bias = unsqueeze(g, bias, [0, 2, 3])
     v = add(g, v, bias)
@@ -320,7 +501,8 @@ def apply_bias(g, dcn_params, v, bias):
 def create_dcn_params(input, weight, offset, mask, bias, stride_h, stride_w,
                       pad_h, pad_w, dilation_h, dilation_w, n_weight_grps,
                       n_offset_grps, use_mask):
-    """Manage parameters for DeformConv2d.
+    """
+    Manage parameters for DeformConv2d.
     """
     additional_pad_h = additional_pad_w = 0
     if pad_h == 0:
@@ -408,35 +590,27 @@ def deform_conv2d(g, input, weight, offset, mask, bias, stride_h, stride_w,
                                    use_mask)
 
     p = calculate_p(g, dcn_params, offset)
-    # => p.shape is (b, group, K, 2, out_h, out_w)
-    p_tl = calculate_p_tl(g, dcn_params, p)
-    p_tlbr = calculate_p_tlbr(g, dcn_params, p_tl)
-    weight_tlbr = calculate_weight(g, dcn_params, p, p_tl)
-    # => ratio_tlbr.shape is (b, group, 1, K, out_h, out_w)
+    p_floor = calculate_p_floor(g, dcn_params, p)
+    p_tlbr = calculate_p_tlbr(g, dcn_params, p_floor)
+    weight_tlbr = calculate_weight(g, dcn_params, p, p_floor)
 
     input = reshape_input_for_gather_elements(g, dcn_params, input)
-    # => input.shape is (b, group, in_h, in_w, ch)
-
     v_tlbr = gather_elements_tlbr(g, dcn_params, input, p_tlbr)
-    # => v_tlbr[x].shape is (b, group, ch, K, out_h, out_w)
 
-    weighted_v_list = [mul(g, weight_tlbr[key], v_tlbr[key]) for key in v_tlbr]
-
-    v = g.op("Sum", *weighted_v_list)
-    # => v.shape is (b, group, ch, K, out_h, out_w)
+    v = calculate_weighted_sum(g, dcn_params, v_tlbr, weight_tlbr)
 
     if use_mask:
         v = apply_mask(g, dcn_params, v, mask)
 
     v = reshape_v_for_conv(g, dcn_params, v)
-    # => v.shape is (b, in_ch, out_h * kernel_h, out_w * kernerl_w)
     v = apply_conv(g, dcn_params, v, weight)
     v = apply_bias(g, dcn_params, v, bias)
     return v
 
 
-def register_deform_conv2d_op():
-    """Register custom operator for torchvision::deform_conv2d.
+def register_deform_conv2d_onnx_op():
+    """
+    Register ONNX operator for torchvision::deform_conv2d.
     """
     register_custom_op_symbolic('torchvision::deform_conv2d', deform_conv2d,
                                 onnx_opset_version)
