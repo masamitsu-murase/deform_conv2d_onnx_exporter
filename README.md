@@ -4,7 +4,7 @@
 
 ## Overview
 
-This module enables to export `deform_conv2d` in PyTorch.
+This module enables you to export `deform_conv2d` in PyTorch.
 
 At this moment, in August 2021, PyTorch 1.9.0 and torchvision 0.10.0 does not support exporting `deform_conv2d` into ONNX, so I implemented this module.
 
@@ -49,6 +49,16 @@ Note that you have to set `opset_version` to `12` or later.
    ```sh
    $ python -m unittest discover -s tests
    ```
+
+## Note
+
+The detail of `deform_conv2d` implementation in PyTorch is not fully documented.  
+Therefore, I investigated the [implementation](https://github.com/pytorch/vision/blob/19ad0bbc5e26504a501b9be3f0345381d6ba1efc/torchvision/csrc/ops/cpu/deform_conv2d_kernel.cpp) to understand memory layout of some variables, such as `offset`.
+
+* `offset`  
+  The shape is `(batch, 2 * group * kernel_h * kernel_w, out_h, out_w)` according to the [reference](https://pytorch.org/vision/stable/ops.html#torchvision.ops.deform_conv2d).  
+  According to the source code, the internal memory layout is `(batch, group, kernel_h, kernel_w, 2, out_h, out_w)`.  
+  The size `2` means "y-coords and x-coords".
 
 ## License
 
