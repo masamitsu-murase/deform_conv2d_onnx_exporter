@@ -150,9 +150,9 @@ class DeformConv2dOpTestCase(unittest.TestCase):
         dcn_params.update(base_dcn_params)
 
         if "input_ch" not in dcn_params:
-            dcn_params["input_ch"] = math.lcm(
-                dcn_params["groups"],
-                dcn_params["n_offset_grps"]) * random.randrange(1, 17)
+            lcm = (dcn_params["groups"] * dcn_params["n_offset_grps"] //
+                   math.gcd(dcn_params["groups"], dcn_params["n_offset_grps"]))
+            dcn_params["input_ch"] = lcm * random.randrange(1, 17)
         if "output_ch" not in dcn_params:
             dcn_params["output_ch"] = dcn_params["groups"] * random.randrange(
                 1, 17)
