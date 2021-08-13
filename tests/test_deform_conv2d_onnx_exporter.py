@@ -4,6 +4,8 @@ import random
 import unittest
 
 import numpy as np
+import onnx
+import onnx.checker
 import onnxruntime
 import torch
 import torch.onnx
@@ -63,6 +65,15 @@ class DeformConv2dOpTestCase(unittest.TestCase):
         )
         return model
 
+    def check_onnx_model(self, model_data):
+        try:
+            onnx.checker.check_model(model_data, full_check=True)
+            self.assertTrue("Valid ONNX model")
+        except onnx.checker.ValidationError as e:
+            self.fail(f"Invalid ONNX model: {e}")
+        except Exception as e:
+            self.fail(f"Unknown exception: {e}")
+
     def convert_to_onnx_model(self, pytorch_model, input, offset, mask=None):
         if mask is not None:
             input_params = (input, offset, mask)
@@ -77,7 +88,10 @@ class DeformConv2dOpTestCase(unittest.TestCase):
                           input_names=input_names,
                           output_names=["output"],
                           opset_version=self.OPSET_VERSION)
-        onnx_model = onnxruntime.InferenceSession(buffer.getvalue())
+        onnx_model_data = buffer.getvalue()
+        self.check_onnx_model(onnx_model_data)
+
+        onnx_model = onnxruntime.InferenceSession(onnx_model_data)
         return onnx_model
 
     def run_pytorch_model(self, model, input, offset, mask=None):
