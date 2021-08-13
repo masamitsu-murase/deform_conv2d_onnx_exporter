@@ -1,0 +1,37 @@
+name: Test and Release
+
+on:
+  push:
+    branches: [ '*' ]
+    tags: ['*']
+  pull_request:
+    branches: [ '*' ]
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        python_version: ["3.6", "3.7", "3.8", "3.9"]
+        os: ["windows-latest", "ubuntu-latest"]
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+    - name: "Disable git autoCRLF"
+      run: git config --global core.autoCRLF false
+
+    - uses: actions/checkout@v2
+
+    - uses: actions/setup-python@v2
+      with:
+        python-version: ${{ matrix.python_version }}
+
+    - name: Install libraries
+      run: pip install -r requirements.txt
+
+    - name: Show library versions
+      run: pip freeze
+
+    - name: Run tests
+      run: python -m unittest discover -s tests

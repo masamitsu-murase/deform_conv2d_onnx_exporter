@@ -1,3 +1,5 @@
+[![Test and Release](https://github.com/masamitsu-murase/deform_conv2d_onnx_exporter/actions/workflows/ci.yml/badge.svg)](https://github.com/masamitsu-murase/deform_conv2d_onnx_exporter/actions/workflows/ci.yml)
+
 # deform_conv2d_onnx_exporter
 
 ## Overview
