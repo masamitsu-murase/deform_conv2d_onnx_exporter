@@ -45,7 +45,7 @@ Note that you have to set `opset_version` to `12` or later.
    ```
 2. Run `unittest`.  
    ```sh
-   $ python -m unittest tests/test_deform_conv2d_onnx_exporter.py
+   $ python -m unittest discover -s tests
    ```
 
 ## License
