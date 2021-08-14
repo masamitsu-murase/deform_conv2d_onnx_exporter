@@ -29,6 +29,10 @@ deform_conv2d_onnx_exporter.register_deform_conv2d_onnx_op()
 model = DeformConv2d(...)
 input_names = ["input", "offset"]
 output_names = ["output"]
+input_params = (
+    torch.rand([1, x, x, x]),  # input
+    torch.randn([1, x, x, x]), # offset
+)
 torch.onnx.export(model,
                   input_params,
                   "output.onnx",
