@@ -35,3 +35,65 @@ jobs:
 
     - name: Run tests
       run: python -m unittest discover -s tests
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/')
+
+    needs: [test]
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: "Disable git autoCRLF"
+      run: git config --global core.autoCRLF false
+
+    - uses: actions/checkout@v2
+
+    - uses: actions/setup-python@v2
+
+    - name: Install dependencies
+      run: pip install wheel
+
+    - name: Create wheel package
+      run: python setup.py bdist_wheel
+
+    - name: Create Release
+      id: create_release
+      uses: actions/create-release@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        tag_name: ${{ github.ref }}
+        release_name: Release ${{ github.ref }}
+        body: Release ${{ github.ref }}
+        draft: true
+        prerelease: false
+
+    - run: ls -alF dist
+
+    - name: Upload all artifacts
+      uses: actions/github-script@v3
+      with:
+        release_id: ${{ steps.create_release.outputs.id }}
+        assets_dir: dist
+        script: |
+          console.log("environment", process.versions);
+          const fs = require("fs").promises;
+          const path = require("path");
+          const { repo: { owner, repo } } = context;
+          const release_id = core.getInput("release_id", { required: true });
+          const assets_dir = core.getInput("assets_dir", { required: true });
+
+          const files = await fs.readdir(assets_dir);
+          console.log("files", files);
+          const asset_uploaders = files.map(file => path.join(assets_dir, file)).map(file => {
+            return fs.readFile(file).then(data => {
+              return github.repos.uploadReleaseAsset({
+                owner,
+                repo,
+                release_id,
+                name: path.basename(file),
+                data
+              });
+            });
+          })
+          Promise.all(asset_uploaders);
