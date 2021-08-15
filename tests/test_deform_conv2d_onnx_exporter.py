@@ -95,6 +95,7 @@ class DeformConv2dOpTestCase(unittest.TestCase):
         return onnx_model
 
     def run_pytorch_model(self, model, input, offset, mask=None):
+        model.eval()
         return model(input, offset, mask)
 
     def run_onnx_model(self, model, input, offset, mask=None):
