@@ -280,7 +280,7 @@ def reshape_input_for_gather_elements(g, dcn_params, input):
             The shape is (b, in_ch, in_h, in_w)
 
     Returns:
-        The shape is (b, group, in_h, in_w, ch_per_group).
+        The shape is (b, group, ch_per_group, in_h, in_w).
     """
     b = dcn_params["batch"]
     group = dcn_params["n_offset_grps"]
@@ -305,20 +305,61 @@ def reshape_input_for_gather_elements(g, dcn_params, input):
     pad = tensor(g, pad_size, dtype=torch.int64)
     input = g.op("Pad", input, pad, mode_s="constant")
     input = reshape(g, input, [b, group, ch, in_h, in_w])
-    input = g.op("Transpose", input, perm_i=[0, 1, 3, 4, 2])
-    # => input.shape is (b, group, in_h, in_w, ch)
     return input
 
 
 def gather_elements(g, dcn_params, input, p_y, p_x):
     """
-    Gather elements specified p_y and p_x.
+    Gather elements specified by p_y and p_x using GatherElements operator.
 
     Args:
         g: graph object.
         dcn_params: parameters for deform_conv2d.
         input: input tensor.
-            The shape is (b, group, in_h, in_w, ch_per_group).
+            The shape is (b, group, ch_per_group, in_h, in_w).
+        p_y: y coordinates of sampling points.
+            The shape is (b, group, K, 1, out_h, out_w).
+        p_x: x coordinates of sampling points.
+            The shape is (b, group, K, 1, out_h, out_w).
+
+    Returns:
+        The shape is (b, group, ch_per_group, K, out_h, out_w).
+    """
+    b = dcn_params["batch"]
+    group = dcn_params["n_offset_grps"]
+    ch = dcn_params["in_ch_per_group"]
+    in_h = dcn_params["in_h"]
+    in_w = dcn_params["in_w"]
+    out_h = dcn_params["out_h"]
+    out_w = dcn_params["out_w"]
+    K = dcn_params["kernel_area_size"]
+    index_dtype_pytorch = dcn_params["index_dtype_pytorch"]
+
+    p_y = reshape(g, p_y, [b, group, 1, K * out_h * out_w])
+    p_x = reshape(g, p_x, [b, group, 1, K * out_h * out_w])
+    p_y = g.op("Mul", p_y, tensor(g, in_w, dtype=index_dtype_pytorch))
+    index = g.op("Add", p_y, p_x)
+    shape = [b, group, ch, K * out_h * out_w]
+    index = g.op("Expand", index, tensor(g, shape, dtype=torch.int64))
+
+    input = reshape(g, input, [b, group, ch, in_h * in_w])
+
+    v = g.op("GatherElements", input, index, axis_i=3)
+    # => v.shape is (b, group, ch_per_group, K * out_h * out_w)
+    v = reshape(g, v, [b, group, ch, K, out_h, out_w])
+
+    return v
+
+
+def gather_nd(g, dcn_params, input, p_y, p_x):
+    """
+    Gather elements specified by p_y and p_x using GatherND.
+
+    Args:
+        g: graph object.
+        dcn_params: parameters for deform_conv2d.
+        input: input tensor.
+            The shape is (b, group, ch_per_group, in_h, in_w).
         p_y: y coordinates of sampling points.
             The shape is (b, group, K, 1, out_h, out_w).
         p_x: x coordinates of sampling points.
@@ -339,8 +380,13 @@ def gather_elements(g, dcn_params, input, p_y, p_x):
     index = g.op("Concat", p_y, p_x, axis_i=3)
     # => index.shape is (b, group, K * out_h * out_w, 2)
 
+    input = g.op("Transpose", input, perm_i=[0, 1, 3, 4, 2])
+    # => input.shape is (b, group, in_h, in_w, ch_per_group)
     v = g.op("GatherND", input, index, batch_dims_i=2)
     # => v.shape is (b, group, K * out_h * out_w, ch)
+    if dcn_params["option"]["enable_openvino_patch"]:
+        # OpenVINO 2021.4 has a bug related to shape of the output of GatherND.
+        v = reshape(g, v, [b, group, K * out_h * out_w, ch])
     v = g.op("Transpose", v, perm_i=[0, 1, 3, 2])
     v = reshape(g, v, [b, group, ch, K, out_h, out_w])
     return v
@@ -354,7 +400,7 @@ def gather_elements_tlbr(g, dcn_params, input, p_tlbr):
         g: graph object.
         dcn_params: parameters for deform_conv2d.
         input: input tensor.
-            The shape is (b, group, in_h, in_w, ch_per_group).
+            The shape is (b, group, ch_per_group, in_h, in_w).
         p_tlbr: A dict, {"t": p_t, "l", p_l, "b": p_b, "r": p_r},
             which contains "t"op, "l"eft, "b"ottom, and "r"ight
             coordinates around p.
@@ -372,7 +418,10 @@ def gather_elements_tlbr(g, dcn_params, input, p_tlbr):
         key_x = key[1]  # "l" or "r"
         p_y = p_tlbr[key_y]
         p_x = p_tlbr[key_x]
-        v = gather_elements(g, dcn_params, input, p_y, p_x)
+        if dcn_params["option"]["use_gathernd"]:
+            v = gather_nd(g, dcn_params, input, p_y, p_x)
+        else:
+            v = gather_elements(g, dcn_params, input, p_y, p_x)
         v_tlbr[key] = v
     return v_tlbr
 
@@ -500,7 +549,7 @@ def apply_bias(g, dcn_params, v, bias):
 
 def create_dcn_params(input, weight, offset, mask, bias, stride_h, stride_w,
                       pad_h, pad_w, dilation_h, dilation_w, n_weight_grps,
-                      n_offset_grps, use_mask):
+                      n_offset_grps, use_mask, option):
     """
     Manage parameters for DeformConv2d.
     """
@@ -575,42 +624,59 @@ def create_dcn_params(input, weight, offset, mask, bias, stride_h, stride_w,
         "padding_w": pad_w,
         "additional_pad_h": additional_pad_h,
         "additional_pad_w": additional_pad_w,
+
+        "option": option,
     }
     return dcn_params
 
 
-@sym_help.parse_args("v", "v", "v", "v", "v", "i", "i", "i", "i", "i", "i",
-                     "i", "i", "b")
-def deform_conv2d(g, input, weight, offset, mask, bias, stride_h, stride_w,
-                  pad_h, pad_w, dilation_h, dilation_w, n_weight_grps,
-                  n_offset_grps, use_mask):
-    dcn_params = create_dcn_params(input, weight, offset, mask, bias, stride_h,
-                                   stride_w, pad_h, pad_w, dilation_h,
-                                   dilation_w, n_weight_grps, n_offset_grps,
-                                   use_mask)
+def deform_conv2d_func(use_gathernd, enable_openvino_patch):
+    @sym_help.parse_args("v", "v", "v", "v", "v", "i", "i", "i", "i", "i", "i",
+                         "i", "i", "b")
+    def deform_conv2d(g, input, weight, offset, mask, bias, stride_h, stride_w,
+                      pad_h, pad_w, dilation_h, dilation_w, n_weight_grps,
+                      n_offset_grps, use_mask):
+        option = {
+            "use_gathernd": use_gathernd,
+            "enable_openvino_patch": enable_openvino_patch,
+        }
+        dcn_params = create_dcn_params(input, weight, offset, mask, bias,
+                                       stride_h, stride_w, pad_h, pad_w,
+                                       dilation_h, dilation_w, n_weight_grps,
+                                       n_offset_grps, use_mask, option)
 
-    p = calculate_p(g, dcn_params, offset)
-    p_floor = calculate_p_floor(g, dcn_params, p)
-    p_tlbr = calculate_p_tlbr(g, dcn_params, p_floor)
-    weight_tlbr = calculate_weight(g, dcn_params, p, p_floor)
+        p = calculate_p(g, dcn_params, offset)
+        p_floor = calculate_p_floor(g, dcn_params, p)
+        p_tlbr = calculate_p_tlbr(g, dcn_params, p_floor)
+        weight_tlbr = calculate_weight(g, dcn_params, p, p_floor)
 
-    input = reshape_input_for_gather_elements(g, dcn_params, input)
-    v_tlbr = gather_elements_tlbr(g, dcn_params, input, p_tlbr)
+        input = reshape_input_for_gather_elements(g, dcn_params, input)
+        v_tlbr = gather_elements_tlbr(g, dcn_params, input, p_tlbr)
 
-    v = calculate_weighted_sum(g, dcn_params, v_tlbr, weight_tlbr)
+        v = calculate_weighted_sum(g, dcn_params, v_tlbr, weight_tlbr)
 
-    if use_mask:
-        v = apply_mask(g, dcn_params, v, mask)
+        if use_mask:
+            v = apply_mask(g, dcn_params, v, mask)
 
-    v = reshape_v_for_conv(g, dcn_params, v)
-    v = apply_conv(g, dcn_params, v, weight)
-    v = apply_bias(g, dcn_params, v, bias)
-    return v
+        v = reshape_v_for_conv(g, dcn_params, v)
+        v = apply_conv(g, dcn_params, v, weight)
+        v = apply_bias(g, dcn_params, v, bias)
+        return v
+
+    return deform_conv2d
 
 
-def register_deform_conv2d_onnx_op():
+def register_deform_conv2d_onnx_op(use_gathernd=True,
+                                   enable_openvino_patch=False):
     """
     Register ONNX operator for torchvision::deform_conv2d.
+
+    Args:
+        use_gathernd: If True, use GatherND. Otherwise use GatherElements.
+        enable_openvino_patch: If True, enable patch for OpenVINO.
+            Otherwise, disable it.
     """
-    register_custom_op_symbolic('torchvision::deform_conv2d', deform_conv2d,
-                                onnx_opset_version)
+    register_custom_op_symbolic(
+        'torchvision::deform_conv2d',
+        deform_conv2d_func(use_gathernd, enable_openvino_patch),
+        onnx_opset_version)
