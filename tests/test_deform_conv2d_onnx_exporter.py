@@ -220,3 +220,23 @@ class DeformConv2dOpTestCase(unittest.TestCase):
             pytorch_result, onnx_result = self.run_with_dcn_params(dcn_params)
             self.assert_result(pytorch_result, onnx_result,
                                f"random parameters: {dcn_params}")
+
+    def test_options_for_register_deform_conv2d_onnx_op(self):
+        try:
+            option_patterns = [
+                (False, False),
+                (True, False),
+                (False, True),
+                (True, True),
+            ]
+            for use_gathernd, enable_openvino_patch in option_patterns:
+                deform_conv2d_onnx_exporter.register_deform_conv2d_onnx_op(
+                    use_gathernd=use_gathernd,
+                    enable_openvino_patch=enable_openvino_patch)
+                dcn_params = self.generate_dcn_parameters()
+                pytorch_result, onnx_result = self.run_with_dcn_params(
+                    dcn_params)
+                self.assert_result(pytorch_result, onnx_result,
+                                   f"parameters: {dcn_params}")
+        finally:
+            deform_conv2d_onnx_exporter.register_deform_conv2d_onnx_op()

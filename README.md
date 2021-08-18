@@ -56,6 +56,15 @@ Note that you have to set `opset_version` to `12` or later.
 
 ## Development notes
 
+### Options for `deform_conv2d_onnx_exporter.register_deform_conv2d_onnx_op()`
+
+You can specify 2 options for this function.
+
+* `use_gathernd`:  
+  If `True`, use `GatherND` operator. Otherwise, use `GatherElements` operator.
+* `enable_openvino_patch`:  
+  If `True`, enable patch for OpenVINO.
+
 ### Referenced paper
 
 This module implements Deformable Convolution v2, described in a paper, "[Deformable ConvNets v2: More Deformable, Better Results](https://arxiv.org/abs/1811.11168)", using ONNX operators.
