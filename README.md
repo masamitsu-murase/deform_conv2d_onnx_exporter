@@ -1,4 +1,4 @@
-[![Test and Release](https://github.com/masamitsu-murase/deform_conv2d_onnx_exporter/actions/workflows/ci.yml/badge.svg)](https://github.com/masamitsu-murase/deform_conv2d_onnx_exporter/actions/workflows/ci.yml)
+[![PyPI version](https://badge.fury.io/py/deform-conv2d-onnx-exporter.svg)](https://badge.fury.io/py/deform-conv2d-onnx-exporter) [![Test and Release](https://github.com/masamitsu-murase/deform_conv2d_onnx_exporter/actions/workflows/ci.yml/badge.svg)](https://github.com/masamitsu-murase/deform_conv2d_onnx_exporter/actions/workflows/ci.yml)
 
 # deform\_conv2d\_onnx\_exporter
 
