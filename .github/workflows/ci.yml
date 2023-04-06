@@ -11,20 +11,37 @@ jobs:
   test:
     strategy:
       fail-fast: false
+      # https://docs.github.com/en/actions/using-jobs/using-a-matrix-for-your-jobs
       matrix:
-        python_version: ["3.8", "3.9", "3.10", "3.11"]
+        python_version: ["3.8", "3.9", "3.10"]
         # https://github.com/pytorch/pytorch/wiki/PyTorch-Versions
-        # https://pytorch.org/get-started/previous-versions/
-        pytorch_pip_libraries:
-        - "torch==1.8.1+cpu torchvision==0.9.1+cpu torchaudio==0.8.1 -f https://download.pytorch.org/whl/torch_stable.html"
-        - "torch==1.9.1+cpu torchvision==0.10.1+cpu torchaudio==0.9.1 -f https://download.pytorch.org/whl/torch_stable.html"
-        - "torch==1.10.1+cpu torchvision==0.11.2+cpu torchaudio==0.10.1 -f https://download.pytorch.org/whl/cpu/torch_stable.html"
-        - "torch==1.11.0+cpu torchvision==0.12.0+cpu torchaudio==0.11.0 --extra-index-url https://download.pytorch.org/whl/cpu"
-        - "torch==1.12.1+cpu torchvision==0.13.1+cpu torchaudio==0.12.1 --extra-index-url https://download.pytorch.org/whl/cpu"
-        - "torch==1.13.1+cpu torchvision==0.14.1+cpu torchaudio==0.13.1 --extra-index-url https://download.pytorch.org/whl/cpu"
-        - "torch==2.0.0 torchvision==0.15.1"
-        - "torch torchvision"
+        pytorch_version: ["1.8", "1.9", "1.10", "1.11", "1.12", "1.13", "2.0", "latest"]
         os: ["windows-latest", "ubuntu-latest"]
+        exclude:
+        - python_version: "3.10"
+          pytorch_version: "1.8"
+        - python_version: "3.10"
+          pytorch_version: "1.9"
+        - python_version: "3.10"
+          pytorch_version: "1.10"
+        include:
+        # https://pytorch.org/get-started/previous-versions/
+        - pytorch_version: "1.8"
+          pytorch_pip_libraries: "torch==1.8.1+cpu torchvision==0.9.1+cpu torchaudio==0.8.1 -f https://download.pytorch.org/whl/torch_stable.html"
+        - pytorch_version: "1.9"
+          pytorch_pip_libraries: "torch==1.9.1+cpu torchvision==0.10.1+cpu torchaudio==0.9.1 -f https://download.pytorch.org/whl/torch_stable.html"
+        - pytorch_version: "1.10"
+          pytorch_pip_libraries: "torch==1.10.1+cpu torchvision==0.11.2+cpu torchaudio==0.10.1 -f https://download.pytorch.org/whl/cpu/torch_stable.html"
+        - pytorch_version: "1.11"
+          pytorch_pip_libraries: "torch==1.11.0+cpu torchvision==0.12.0+cpu torchaudio==0.11.0 --extra-index-url https://download.pytorch.org/whl/cpu"
+        - pytorch_version: "1.12"
+          pytorch_pip_libraries: "torch==1.12.1+cpu torchvision==0.13.1+cpu torchaudio==0.12.1 --extra-index-url https://download.pytorch.org/whl/cpu"
+        - pytorch_version: "1.13"
+          pytorch_pip_libraries: "torch==1.13.1+cpu torchvision==0.14.1+cpu torchaudio==0.13.1 --extra-index-url https://download.pytorch.org/whl/cpu"
+        - pytorch_version: "2.0"
+          pytorch_pip_libraries: "torch==2.0.0 torchvision==0.15.1"
+        - pytorch_version: "latest"
+          pytorch_pip_libraries: "torch torchvision"
 
     runs-on: ${{ matrix.os }}
 
