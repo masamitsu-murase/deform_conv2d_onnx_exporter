@@ -23,9 +23,14 @@ setup(
     zip_safe=True,
     python_requires='>=3.6.*, <4',
     install_requires=['torch>=1.8.0', 'torchvision>=0.9.0'],
+    extras_require={
+        'test': ['onnx', 'onnxruntime'],
+        'package': ['wheel', 'twine']
+    },
     project_urls={
         'Bug Reports':
         'https://github.com/masamitsu-murase/deform_conv2d_onnx_exporter/issues',
-        'Source': 'https://github.com/masamitsu-murase/deform_conv2d_onnx_exporter',
+        'Source':
+        'https://github.com/masamitsu-murase/deform_conv2d_onnx_exporter',
     },
 )
