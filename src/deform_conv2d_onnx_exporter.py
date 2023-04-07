@@ -15,6 +15,10 @@ This exporter requires opset version 12 to support the following operators:
 import torch
 from torch.onnx import register_custom_op_symbolic
 from torch.onnx import symbolic_helper as sym_help
+try:
+    from torch.onnx._type_utils import JitScalarType
+except ImportError:
+    JitScalarType = None
 
 __all__ = ["register_deform_conv2d_onnx_op"]
 
@@ -573,15 +577,25 @@ def create_dcn_params(input, weight, offset, mask, bias, stride_h, stride_w,
     out_h = get_tensor_dim_size(offset, 2)
     out_w = get_tensor_dim_size(offset, 3)
 
-    offset_dtype = sym_help._try_get_scalar_type(offset)
-    offset_dtype_onnx = sym_help.cast_pytorch_to_onnx[offset_dtype]
-    dtype_index = sym_help.scalar_type_to_onnx.index(offset_dtype_onnx)
-    offset_dtype_pytorch = sym_help.scalar_type_to_pytorch_type[dtype_index]
+    if JitScalarType is not None and hasattr(JitScalarType, "from_value"):
+        # 2.0 and later
+        scalar_type = JitScalarType.from_value(offset)
+        offset_dtype_onnx = scalar_type.onnx_type()
+        offset_dtype_pytorch = scalar_type.dtype()
 
-    index_dtype = "Long"
-    index_dtype_onnx = sym_help.cast_pytorch_to_onnx[index_dtype]
-    dtype_index = sym_help.scalar_type_to_onnx.index(index_dtype_onnx)
-    index_dtype_pytorch = sym_help.scalar_type_to_pytorch_type[dtype_index]
+        scalar_type = JitScalarType.from_dtype(torch.int64)
+        index_dtype_onnx = scalar_type.onnx_type()
+        index_dtype_pytorch = scalar_type.dtype()
+    else:
+        offset_dtype = sym_help._try_get_scalar_type(offset)
+        offset_dtype_onnx = sym_help.cast_pytorch_to_onnx[offset_dtype]
+        dtype_idx = sym_help.scalar_type_to_onnx.index(offset_dtype_onnx)
+        offset_dtype_pytorch = sym_help.scalar_type_to_pytorch_type[dtype_idx]
+
+        index_dtype = "Long"
+        index_dtype_onnx = sym_help.cast_pytorch_to_onnx[index_dtype]
+        dtype_idx = sym_help.scalar_type_to_onnx.index(index_dtype_onnx)
+        index_dtype_pytorch = sym_help.scalar_type_to_pytorch_type[dtype_idx]
 
     dcn_params = {
         # batch and kernel
@@ -610,12 +624,10 @@ def create_dcn_params(input, weight, offset, mask, bias, stride_h, stride_w,
         "n_weight_grps": n_weight_grps,
 
         # offset data type
-        "offset_dtype": offset_dtype,
         "offset_dtype_onnx": offset_dtype_onnx,
         "offset_dtype_pytorch": offset_dtype_pytorch,
 
         # index data type
-        "index_dtype": index_dtype,
         "index_dtype_onnx": index_dtype_onnx,
         "index_dtype_pytorch": index_dtype_pytorch,
 

@@ -11,14 +11,37 @@ jobs:
   test:
     strategy:
       fail-fast: false
+      # https://docs.github.com/en/actions/using-jobs/using-a-matrix-for-your-jobs
       matrix:
-        python_version: ["3.6", "3.7", "3.8", "3.9"]
-        pytorch_pip_libraries:
-        - "torch==1.8.0 torchvision==0.9.0"
-        - "torch==1.8.1 torchvision==0.9.1"
-        - "torch==1.9.0 torchvision==0.10.0"
-        - "torch torchvision"
+        python_version: ["3.8", "3.9", "3.10"]
+        # https://github.com/pytorch/pytorch/wiki/PyTorch-Versions
+        pytorch_version: ["1.8", "1.9", "1.10", "1.11", "1.12", "1.13", "2.0", "latest"]
         os: ["windows-latest", "ubuntu-latest"]
+        exclude:
+        - python_version: "3.10"
+          pytorch_version: "1.8"
+        - python_version: "3.10"
+          pytorch_version: "1.9"
+        - python_version: "3.10"
+          pytorch_version: "1.10"
+        include:
+        # https://pytorch.org/get-started/previous-versions/
+        - pytorch_version: "1.8"
+          pytorch_pip_libraries: "torch==1.8.1+cpu torchvision==0.9.1+cpu torchaudio==0.8.1 -f https://download.pytorch.org/whl/torch_stable.html"
+        - pytorch_version: "1.9"
+          pytorch_pip_libraries: "torch==1.9.1+cpu torchvision==0.10.1+cpu torchaudio==0.9.1 -f https://download.pytorch.org/whl/torch_stable.html"
+        - pytorch_version: "1.10"
+          pytorch_pip_libraries: "torch==1.10.1+cpu torchvision==0.11.2+cpu torchaudio==0.10.1 -f https://download.pytorch.org/whl/cpu/torch_stable.html"
+        - pytorch_version: "1.11"
+          pytorch_pip_libraries: "torch==1.11.0+cpu torchvision==0.12.0+cpu torchaudio==0.11.0 --extra-index-url https://download.pytorch.org/whl/cpu"
+        - pytorch_version: "1.12"
+          pytorch_pip_libraries: "torch==1.12.1+cpu torchvision==0.13.1+cpu torchaudio==0.12.1 --extra-index-url https://download.pytorch.org/whl/cpu"
+        - pytorch_version: "1.13"
+          pytorch_pip_libraries: "torch==1.13.1+cpu torchvision==0.14.1+cpu torchaudio==0.13.1 --extra-index-url https://download.pytorch.org/whl/cpu"
+        - pytorch_version: "2.0"
+          pytorch_pip_libraries: "torch==2.0.0 torchvision==0.15.1"
+        - pytorch_version: "latest"
+          pytorch_pip_libraries: "torch torchvision"
 
     runs-on: ${{ matrix.os }}
 
@@ -26,9 +49,9 @@ jobs:
     - name: "Disable git autoCRLF"
       run: git config --global core.autoCRLF false
 
-    - uses: actions/checkout@v2
+    - uses: actions/checkout@v3
 
-    - uses: actions/setup-python@v2
+    - uses: actions/setup-python@v4
       with:
         python-version: ${{ matrix.python_version }}
 
@@ -36,66 +59,67 @@ jobs:
       run: pip install ${{ matrix.pytorch_pip_libraries }}
 
     - name: Install libraries
-      run: pip install -r requirements.txt
+      run: pip install -e .[test]
 
     - name: Show library versions
       run: pip freeze
 
     - name: Run tests
-      run: python -m unittest discover -s tests
+      run: python -m unittest discover -s tests -t . -v
 
   release:
     if: startsWith(github.ref, 'refs/tags/')
 
     needs: [test]
     runs-on: ubuntu-latest
+    permissions: write-all
 
     steps:
     - name: "Disable git autoCRLF"
       run: git config --global core.autoCRLF false
 
-    - uses: actions/checkout@v2
+    - uses: actions/checkout@v3
 
-    - uses: actions/setup-python@v2
+    - uses: actions/setup-python@v4
 
     - name: Install dependencies
-      run: pip install wheel
+      run: pip install -e .[package]
 
     - name: Create wheel package
       run: python setup.py bdist_wheel
 
-    - name: Create Release
-      id: create_release
-      uses: actions/create-release@v1
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      with:
-        tag_name: ${{ github.ref }}
-        release_name: Release ${{ github.ref }}
-        body: Release ${{ github.ref }}
-        draft: true
-        prerelease: false
-
     - run: ls -alF dist
 
     - name: Upload all artifacts
-      uses: actions/github-script@v3
+      uses: actions/github-script@v6
+      env:
+        ASSETS_DIR: dist
+        TAG_NAME: ${{ github.ref }}
       with:
-        release_id: ${{ steps.create_release.outputs.id }}
-        assets_dir: dist
         script: |
           console.log("environment", process.versions);
           const fs = require("fs").promises;
           const path = require("path");
           const { repo: { owner, repo } } = context;
-          const release_id = core.getInput("release_id", { required: true });
-          const assets_dir = core.getInput("assets_dir", { required: true });
+          const tag_name = process.env["TAG_NAME"];
+
+          const response = await github.rest.repos.createRelease({
+            owner,
+            repo,
+            tag_name,
+            body: "Release " + tag_name,
+            draft: true,
+            prerelease: false,
+          });
+
+          const release_id = response.data.id;
+          const assets_dir = process.env["ASSETS_DIR"];
 
           const files = await fs.readdir(assets_dir);
           console.log("files", files);
           const asset_uploaders = files.map(file => path.join(assets_dir, file)).map(file => {
             return fs.readFile(file).then(data => {
-              return github.repos.uploadReleaseAsset({
+              return github.rest.repos.uploadReleaseAsset({
                 owner,
                 repo,
                 release_id,
@@ -103,5 +127,5 @@ jobs:
                 data
               });
             });
-          })
-          Promise.all(asset_uploaders);
+          });
+          await Promise.all(asset_uploaders);
