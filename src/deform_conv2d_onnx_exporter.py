@@ -577,7 +577,8 @@ def create_dcn_params(input, weight, offset, mask, bias, stride_h, stride_w,
     out_h = get_tensor_dim_size(offset, 2)
     out_w = get_tensor_dim_size(offset, 3)
 
-    if JitScalarType is not None:
+    if JitScalarType is not None and hasattr(JitScalarType, "from_value"):
+        # 2.0 and later
         scalar_type = JitScalarType.from_value(offset)
         offset_dtype_onnx = scalar_type.onnx_type()
         offset_dtype_pytorch = scalar_type.dtype()
@@ -588,13 +589,13 @@ def create_dcn_params(input, weight, offset, mask, bias, stride_h, stride_w,
     else:
         offset_dtype = sym_help._try_get_scalar_type(offset)
         offset_dtype_onnx = sym_help.cast_pytorch_to_onnx[offset_dtype]
-        dtype_index = sym_help.scalar_type_to_onnx.index(offset_dtype_onnx)
-        offset_dtype_pytorch = sym_help.scalar_type_to_pytorch_type[dtype_index]
+        dtype_idx = sym_help.scalar_type_to_onnx.index(offset_dtype_onnx)
+        offset_dtype_pytorch = sym_help.scalar_type_to_pytorch_type[dtype_idx]
 
         index_dtype = "Long"
         index_dtype_onnx = sym_help.cast_pytorch_to_onnx[index_dtype]
-        dtype_index = sym_help.scalar_type_to_onnx.index(index_dtype_onnx)
-        index_dtype_pytorch = sym_help.scalar_type_to_pytorch_type[dtype_index]
+        dtype_idx = sym_help.scalar_type_to_onnx.index(index_dtype_onnx)
+        index_dtype_pytorch = sym_help.scalar_type_to_pytorch_type[dtype_idx]
 
     dcn_params = {
         # batch and kernel
@@ -623,12 +624,10 @@ def create_dcn_params(input, weight, offset, mask, bias, stride_h, stride_w,
         "n_weight_grps": n_weight_grps,
 
         # offset data type
-        "offset_dtype": offset_dtype,
         "offset_dtype_onnx": offset_dtype_onnx,
         "offset_dtype_pytorch": offset_dtype_pytorch,
 
         # index data type
-        "index_dtype": index_dtype,
         "index_dtype_onnx": index_dtype_onnx,
         "index_dtype_pytorch": index_dtype_pytorch,
 
