@@ -9,7 +9,7 @@ with open(path.join(here, 'README.md'), encoding='utf-8') as f:
 
 setup(
     name='deform_conv2d_onnx_exporter',
-    version='1.1.0',
+    version='1.2.0',
     description='A library to support onnx export of deform_conv2d in PyTorch.',
     long_description=long_description,
     long_description_content_type='text/markdown',
